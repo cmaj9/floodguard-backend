@@ -114,6 +114,43 @@ router.get('/', async (req, res) => {
   }
 });
 
+// ── GET /api/stations/next-id ─────────────────────────────────────
+// Returns the next available station_id in the format ST-NNN
+router.get('/next-id', async (_req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT station_id FROM station WHERE station_id ~ '^ST-[0-9]+$' ORDER BY station_id DESC LIMIT 1`
+    );
+
+    let nextNum = 1;
+    if (result.rows.length > 0) {
+      const lastId = result.rows[0].station_id; // e.g. 'ST-003'
+      const lastNum = parseInt(lastId.replace('ST-', ''), 10);
+      if (!isNaN(lastNum)) nextNum = lastNum + 1;
+    }
+
+    const nextId = `ST-${String(nextNum).padStart(3, '0')}`;
+    res.json({ success: true, data: { next_id: nextId } });
+  } catch (err) {
+    console.error('[API GET /stations/next-id] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Failed to generate next station ID' });
+  }
+});
+
+// ── GET /api/stations/gateways ────────────────────────────────────
+// Returns all gateways for the station creation dropdown
+router.get('/gateways', async (_req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT gateway_id, gateway_name, status, ip_address FROM gateway ORDER BY gateway_name`
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error('[API GET /stations/gateways] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Failed to fetch gateways' });
+  }
+});
+
 // ── GET /api/stations/:stationId ──────────────────────────────────
 // Returns single station detail with last reading
 router.get('/:stationId', async (req, res) => {
@@ -212,36 +249,38 @@ router.get('/:stationId', async (req, res) => {
   }
 });
 
-// ── PATCH /api/stations/:stationId/status ──────────────────────────
+// ── PATCH /api/stations/:stationId/status ─────────────────────────
 // Quick toggle station status ('active' / 'offline' / 'maintenance')
 router.patch('/:stationId/status', async (req, res) => {
   const { stationId } = req.params;
   const { status } = req.body;
 
-  const validStatuses = ['active', 'offline', 'maintenance'];
+  const validStatuses = ['active', 'offline', 'inactive', 'maintenance'];
   if (!status || !validStatuses.includes(status)) {
     return res.status(400).json({
       success: false,
-      error: `สถานะไม่ถูกต้อง (ต้องเป็น ${validStatuses.join(', ')})`,
+      error: `สถานะไม่ถูกต้อง (ต้องเป็น active, offline, หรือ maintenance)`,
     });
   }
+
+  // Normalize: 'inactive' -> 'offline'
+  const dbStatus = status === 'inactive' ? 'offline' : status;
 
   try {
     const result = await db.query(
       `UPDATE station SET status = $1 WHERE station_id = $2 RETURNING station_id, station_name, status`,
-      [status, stationId]
+      [dbStatus, stationId]
     );
 
     if (result.rowCount === 0) {
       return res.status(404).json({ success: false, error: 'Station not found' });
     }
 
-    const row = result.rows[0];
-    console.log(`[API /stations] Station ${stationId} status changed to '${status}'`);
+    console.log(`[API /stations] Station ${stationId} status -> '${dbStatus}'`);
     res.json({
       success: true,
-      data: row,
-      message: status === 'active' ? 'เปิดให้บริการสถานีเรียบร้อยแล้ว' : 'ปรับสถานะสถานีเป็นออฟไลน์เรียบร้อยแล้ว',
+      data: result.rows[0],
+      message: dbStatus === 'active' ? 'เปิดให้บริการสถานีเรียบร้อยแล้ว' : 'ปรับสถานะสถานีเป็นออฟไลน์เรียบร้อยแล้ว',
     });
   } catch (err) {
     console.error(`[API /stations/${stationId}/status] Error:`, err.message);
@@ -300,7 +339,6 @@ router.put('/:stationId/calibration', async (req, res) => {
     const tiltEnabled = updated.tilt_compensation_enabled;
     const blindZone = updated.blind_zone_offset;
 
-    // Recalculate all historical and latest readings in database immediately
     let recalculatedCount = 0;
     try {
       recalculatedCount = await recalculateStationReadings(stationId, newSensorToRef, tiltEnabled, blindZone);
@@ -308,7 +346,7 @@ router.put('/:stationId/calibration', async (req, res) => {
       console.warn(`[API /stations/${stationId}/calibration] Recalculate warning:`, recalcErr.message);
     }
 
-    console.log(`[API /stations] Station ${stationId} calibrated: D_ref=${newSensorToRef}m, Ref='${updated.reference_point_name}', Recalculated=${recalculatedCount} readings`);
+    console.log(`[API /stations] Station ${stationId} calibrated: D_ref=${newSensorToRef}m, Recalculated=${recalculatedCount} readings`);
     res.json({
       success: true,
       data: updated,
@@ -410,45 +448,8 @@ router.put('/:stationId', async (req, res) => {
   }
 });
 
-// ── PATCH /api/stations/:stationId/status ─────────────────────────
-// Quickly toggle station status: 'active', 'offline', 'maintenance'
-router.patch('/:stationId/status', async (req, res) => {
-  const { stationId } = req.params;
-  const { status } = req.body;
-
-  if (!status || !['active', 'offline', 'inactive', 'maintenance'].includes(status)) {
-    return res.status(400).json({
-      success: false,
-      error: 'Invalid status. Must be active, offline, or maintenance',
-    });
-  }
-
-  // Normalize: 'inactive' -> 'offline'
-  const dbStatus = status === 'inactive' ? 'offline' : status;
-
-  try {
-    const result = await db.query(
-      `UPDATE station SET status = $1 WHERE station_id = $2 RETURNING *`,
-      [dbStatus, stationId]
-    );
-
-    if (result.rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'Station not found' });
-    }
-
-    res.json({
-      success: true,
-      data: result.rows[0],
-      message: `เปลี่ยนสถานะสถานีเป็น ${dbStatus} สำเร็จ`,
-    });
-  } catch (err) {
-    console.error(`[API PATCH /stations/${stationId}/status] Error:`, err.message);
-    res.status(500).json({ success: false, error: err.message || 'Failed to update station status' });
-  }
-});
-
 // ── POST /api/stations ─────────────────────────────────────────────
-// Create new station
+// Create new station with duplicate check and gateway validation
 router.post('/', async (req, res) => {
   const {
     station_id,
@@ -466,6 +467,7 @@ router.post('/', async (req, res) => {
     normal_max,
     blind_zone_offset,
     tilt_compensation_enabled,
+    status,
   } = req.body;
 
   if (!station_id || !station_name || !gateway_id) {
@@ -473,9 +475,32 @@ router.post('/', async (req, res) => {
   }
 
   try {
+    // Check for duplicate station_id
+    const dupCheck = await db.query('SELECT station_id FROM station WHERE station_id = $1', [station_id]);
+    if (dupCheck.rows.length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: `รหัสสถานี "${station_id}" มีอยู่ในระบบแล้ว กรุณาใช้รหัสอื่น`,
+      });
+    }
+
+    // Verify gateway exists
+    const gwCheck = await db.query('SELECT gateway_id FROM gateway WHERE gateway_id = $1', [gateway_id]);
+    if (gwCheck.rows.length === 0) {
+      return res.status(400).json({ success: false, error: `ไม่พบ Gateway "${gateway_id}" ในระบบ` });
+    }
+
     const refName = reference_point_name && reference_point_name.trim() !== ''
       ? reference_point_name.trim()
       : 'จุดอ้างอิง';
+
+    // StationStatus enum values: 'active', 'inactive', 'maintenance', 'offline'
+    const validStationStatuses = ['active', 'inactive', 'maintenance', 'offline'];
+    const dbStatus = validStationStatuses.includes(status) ? status : 'active';
+
+    // StationType enum values: 'river', 'canal', 'reservoir', 'urban'
+    const validStationTypes = ['river', 'canal', 'reservoir', 'urban'];
+    const dbType = validStationTypes.includes(station_type) ? station_type : 'river';
 
     const sql = `
       INSERT INTO station (
@@ -485,11 +510,11 @@ router.post('/', async (req, res) => {
         warning_level, critical_level, max_level, normal_max,
         blind_zone_offset, tilt_compensation_enabled
       ) VALUES (
-        $1, $2, $3, COALESCE($4, 'river'),
-        $5, $6, $7, NOW(), 'active',
-        COALESCE($8, 2.0), $9,
-        $10, $11, COALESCE($12, 10.0), COALESCE($13, 3.0),
-        COALESCE($14, 0.28), COALESCE($15, true)
+        $1, $2, $3, $4::"StationType",
+        $5, $6, $7, NOW(), $8::"StationStatus",
+        COALESCE($9, 2.0), $10,
+        $11, $12, $13, $14,
+        COALESCE($15, 0.28), COALESCE($16, true)
       )
       RETURNING *
     `;
@@ -498,25 +523,33 @@ router.post('/', async (req, res) => {
       station_id,
       gateway_id,
       station_name,
-      station_type,
-      location_name,
+      dbType,
+      location_name || null,
       latitude != null ? Number(latitude) : null,
       longitude != null ? Number(longitude) : null,
+      dbStatus,
       sensor_to_ref_distance != null ? Number(sensor_to_ref_distance) : 2.0,
       refName,
       warning_level != null && !isNaN(Number(warning_level)) ? Number(warning_level) : null,
       critical_level != null && !isNaN(Number(critical_level)) ? Number(critical_level) : null,
-      max_level != null ? Number(max_level) : 10.0,
-      normal_max != null ? Number(normal_max) : 3.0,
+      max_level != null ? Number(max_level) : null,
+      normal_max != null ? Number(normal_max) : null,
       blind_zone_offset != null ? Number(blind_zone_offset) : 0.28,
       tilt_compensation_enabled != null ? Boolean(tilt_compensation_enabled) : true,
     ];
 
     const result = await db.query(sql, values);
+    console.log(`[API POST /stations] Created: ${station_id} (${station_name})`);
     res.status(201).json({ success: true, data: result.rows[0], message: 'เพิ่มสถานีสำเร็จ' });
   } catch (err) {
     console.error('[API POST /stations] Error:', err.message);
-    res.status(500).json({ success: false, error: 'Failed to create station' });
+    if (err.code === '23505') {
+      return res.status(409).json({ success: false, error: 'รหัสสถานีนี้มีอยู่ในระบบแล้ว' });
+    }
+    if (err.code === '23503') {
+      return res.status(400).json({ success: false, error: 'ไม่พบ Gateway ที่ระบุในระบบ' });
+    }
+    res.status(500).json({ success: false, error: err.message || 'Failed to create station' });
   }
 });
 

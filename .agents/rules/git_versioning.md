@@ -32,3 +32,14 @@ Before any commit is pushed to the remote repository:
    git tag vX.Y.Z
    git push origin main --tags
    ```
+
+---
+
+## 3. Strict User Approval Required for Commits & Pushing (Mandatory)
+
+**All agents are strictly prohibited from automatically running `git commit` or `git push` without prior explicit approval from the user.**
+
+* Before running any Git commit or push command:
+  1. The agent must prepare and test all changes locally.
+  2. The agent must clearly explain the completed changes and wait for the user to explicitly say "commit" or "push".
+  3. Under NO circumstances should an agent self-trigger `git commit` or `git push` during autonomous reasoning or without the user's direct instruction.

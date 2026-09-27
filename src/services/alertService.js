@@ -50,12 +50,13 @@ async function isAlertOnCooldown(stationId, alertType, cooldownMinutes = ALERT_C
 /**
  * Save alert to database and dispatch LINE Flex notifications to subscribed users
  */
-async function saveAndNotify({ stationId, stationName, alertType, value, threshold, message, refName, station }) {
+async function saveAndNotify({ stationId, stationName, alertType, value, threshold, message, refName, station, cooldownMinutes }) {
   try {
+    const effectiveCooldown = cooldownMinutes || ALERT_COOLDOWN_MINUTES;
     // 1. Check cooldown to avoid flooding users
-    const onCooldown = await isAlertOnCooldown(stationId, alertType);
+    const onCooldown = await isAlertOnCooldown(stationId, alertType, effectiveCooldown);
     if (onCooldown) {
-      console.log(`[AlertService] Alert ${alertType} for ${stationId} is on cooldown (< ${ALERT_COOLDOWN_MINUTES}m), skipping duplicate`);
+      console.log(`[AlertService] Alert ${alertType} for ${stationId} is on cooldown (< ${effectiveCooldown}m), skipping duplicate`);
       return null;
     }
 
@@ -133,6 +134,7 @@ async function checkWaterLevel(station, fields, settings) {
         value: current,
         threshold: station.critical_level,
         refName,
+        cooldownMinutes: settings.water_level_cooldown_minutes || 30,
         message: `ระดับน้ำแตะเกณฑ์วิกฤต ${formatLevel(current)} ม. (${relativeDesc}) แตะเกณฑ์ ${formatLevel(station.critical_level)} ม.`,
       });
       return;
@@ -154,6 +156,7 @@ async function checkWaterLevel(station, fields, settings) {
         value: current,
         threshold: station.warning_level,
         refName,
+        cooldownMinutes: settings.water_level_cooldown_minutes || 30,
         message: `ระดับน้ำแตะเกณฑ์เฝ้าระวัง ${formatLevel(current)} ม. (${relativeDesc}) แตะเกณฑ์ ${formatLevel(station.warning_level)} ม.`,
       });
     }
@@ -163,7 +166,7 @@ async function checkWaterLevel(station, fields, settings) {
 /**
  * Check Sensor Blind Zone Condition
  */
-async function checkBlindZone(station, fields) {
+async function checkBlindZone(station, fields, settings = {}) {
   if (fields.is_blind_zone && fields.raw_distance != null) {
     const limit = station.blind_zone_offset || 0.28;
     await saveAndNotify({
@@ -173,6 +176,7 @@ async function checkBlindZone(station, fields) {
       value: fields.raw_distance,
       threshold: limit,
       refName: station.reference_point_name,
+      cooldownMinutes: settings.water_level_cooldown_minutes || 30,
       message: `ผิวน้ำเข้าใกล้หัวเซนเซอร์ในระยะบอด (${fields.raw_distance.toFixed(2)} ม. <= ${limit.toFixed(2)} ม.) เซนเซอร์อาจจมน้ำหรืออ่านค่าคลาดเคลื่อน`,
     });
   }
@@ -216,6 +220,7 @@ async function checkRateOfRise(station, fields, settings, currentTimestamp = new
           value: parseFloat(ratePerHour.toFixed(2)),
           threshold,
           refName: station.reference_point_name,
+          cooldownMinutes: settings.rate_of_rise_cooldown_minutes || 30,
           message: `อัตราการเพิ่มของระดับน้ำสูงผิดปกติ +${ratePerHour.toFixed(2)} ม./ชม. (เกณฑ์ ${threshold} ม./ชม.)`,
         });
       }
@@ -242,6 +247,7 @@ async function checkBatteryLevel(station, fields, settings) {
       value: fields.battery_percent,
       threshold,
       refName: station.reference_point_name,
+      cooldownMinutes: settings.battery_low_cooldown_minutes || 120,
       message: `ระดับแบตเตอรี่สถานีต่ำ ${fields.battery_percent}% (เกณฑ์ <= ${threshold}%)`,
     });
   }
@@ -272,6 +278,7 @@ async function checkGeofence(station, fields, settings) {
       value: parseFloat(distanceMeters.toFixed(1)),
       threshold,
       refName: station.reference_point_name,
+      cooldownMinutes: settings.geofence_cooldown_minutes || 60,
       message: `สถานีเคลื่อนที่ออกนอกตำแหน่งเดิม ${distanceMeters.toFixed(1)} ม. (เกณฑ์ ${threshold} ม.)`,
     });
   }
@@ -305,7 +312,7 @@ async function checkReadingAlerts(stationId, fields, timestamp = new Date()) {
     // Run checks concurrently
     await Promise.allSettled([
       checkWaterLevel(station, fields, settings),
-      checkBlindZone(station, fields),
+      checkBlindZone(station, fields, settings),
       checkRateOfRise(station, fields, settings, timestamp),
       checkBatteryLevel(station, fields, settings),
       checkGeofence(station, fields, settings),
@@ -355,6 +362,7 @@ async function checkOfflineStations() {
           value: minutesOffline,
           threshold: timeoutMinutes,
           refName: station.reference_point_name,
+          cooldownMinutes: stationSettings.offline_cooldown_minutes || globalSettings.offline_cooldown_minutes || 60,
           message: `สถานีขาดการส่งข้อมูลเข้าสู่ระบบเป็นเวลา ${minutesOffline} นาที (เกณฑ์ ${timeoutMinutes} นาที)`,
         });
       }

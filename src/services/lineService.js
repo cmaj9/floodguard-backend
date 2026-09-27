@@ -388,13 +388,26 @@ function createAlertFlexMessage({
     comparisonText = 'องศาการเอียงเกินเกณฑ์ปลอดภัย';
   }
 
-  // Telemetry sub-metrics
-  const batteryPercent = Math.round(Number(station?.battery_percent ?? (alertType === 'battery' ? value : 92)));
-  const batteryVoltage = Number(station?.battery_voltage ?? (station?.voltage ?? 4.12)).toFixed(2);
-  const rssi = Math.round(Number(station?.rssi ?? -78));
-  const tiltDegrees = Number(station?.tilt_x ?? (alertType === 'tilt' ? value : 0.8)).toFixed(1);
-  const tiltStatusText = Number(tiltDegrees) > 15 ? 'เอียงผิดปกติ' : 'สมดุลปกติ';
+  // Telemetry sub-metrics — only use real values from the station object
+  const isStationOffline = alertType === 'offline';
+  const batteryPercent = Math.round(Number(station?.battery_percent ?? (alertType === 'battery' ? value : null)));
+  const batteryVoltage = station?.battery_voltage != null ? Number(station.battery_voltage).toFixed(2) : null;
+  const hasBattery = !isNaN(batteryPercent) && station?.battery_percent != null || alertType === 'battery';
+  const temperature = station?.temperature != null ? Number(station.temperature).toFixed(1) : null;
+  const rssi = station?.rssi != null ? Math.round(Number(station.rssi)) : null;
+  const tiltDegrees = station?.tilt_x != null ? Number(station.tilt_x).toFixed(1) : (alertType === 'tilt' ? Number(value).toFixed(1) : null);
+  const tiltStatusText = tiltDegrees != null ? (Number(tiltDegrees) > 15 ? 'เอียงผิดปกติ' : 'สมดุลปกติ') : '-';
   const locationLabel = station?.location_name || 'สถานีโทรมาตรวัดระดับน้ำ';
+
+  // Battery bar: calculate fill percentage (0-100), colour-coded
+  const battFill = hasBattery ? Math.min(100, Math.max(0, batteryPercent)) : 0;
+  const battColor = battFill > 50 ? '#10B981' : battFill > 20 ? '#F59E0B' : '#EF4444';
+  const battLabel = hasBattery ? (battFill > 50 ? 'พร้อมใช้งาน' : battFill > 20 ? 'แบตปานกลาง' : 'แบตต่ำ') : '-';
+
+  // Temperature colour
+  const tempNum = temperature != null ? Number(temperature) : null;
+  const tempColor = tempNum == null ? '#94A3B8' : tempNum > 35 ? '#EF4444' : tempNum > 28 ? '#F59E0B' : '#10B981';
+  const tempLabel = tempNum == null ? '-' : tempNum > 35 ? 'ร้อนมาก' : tempNum > 28 ? 'ปกติ' : 'เย็น';
 
   const bubble = {
     type: 'bubble',
@@ -559,14 +572,14 @@ function createAlertFlexMessage({
             },
           ],
         },
-        // 3. Sub-Metrics Grid (2 columns Bento)
+        // 3. Sub-Metrics Grid — Priority: Temperature (left) + Battery Bar (right)
         {
           type: 'box',
           layout: 'horizontal',
-          spacing: 'md',
+          spacing: 'sm',
           margin: 'sm',
           contents: [
-            // Left Box: Power Status
+            // LEFT: Temperature
             {
               type: 'box',
               layout: 'vertical',
@@ -579,44 +592,45 @@ function createAlertFlexMessage({
               contents: [
                 {
                   type: 'text',
-                  text: 'สถานะพลังงาน',
+                  text: 'อุณหภูมิ',
                   size: 'xxs',
                   color: BENTO_THEME.textSecondary,
                   weight: 'bold',
                 },
                 {
                   type: 'box',
-                  layout: 'baseline',
+                  layout: 'horizontal',
+                  alignItems: 'center',
                   spacing: 'xs',
                   margin: 'xs',
                   contents: [
                     {
                       type: 'text',
-                      text: `${batteryPercent}`,
+                      text: temperature != null ? `${temperature}` : '-',
                       size: 'xl',
                       weight: 'bold',
-                      color: BENTO_THEME.textPrimary,
+                      color: tempColor,
                       flex: 0,
                     },
-                    {
+                    ...(temperature != null ? [{
                       type: 'text',
-                      text: '%',
+                      text: '°C',
                       size: 'xs',
                       color: BENTO_THEME.textSecondary,
-                    },
+                    }] : []),
                   ],
                 },
                 {
                   type: 'text',
-                  text: `แรงดัน ${batteryVoltage} V`,
+                  text: tempLabel || '-',
                   size: 'xxs',
-                  color: batteryPercent <= 20 ? '#EF4444' : '#10B981',
+                  color: tempColor,
                   weight: 'bold',
                   margin: 'xs',
                 },
               ],
             },
-            // Right Box: Connectivity & Device Integrity
+            // RIGHT: Battery Bar Gauge
             {
               type: 'box',
               layout: 'vertical',
@@ -628,46 +642,111 @@ function createAlertFlexMessage({
               paddingAll: '12px',
               contents: [
                 {
-                  type: 'text',
-                  text: 'การเชื่อมต่อ & อุปกรณ์',
-                  size: 'xxs',
-                  color: BENTO_THEME.textSecondary,
-                  weight: 'bold',
-                },
-                {
                   type: 'box',
-                  layout: 'baseline',
-                  spacing: 'xs',
-                  margin: 'xs',
+                  layout: 'horizontal',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
                   contents: [
                     {
                       type: 'text',
-                      text: `${rssi}`,
-                      size: 'xl',
+                      text: 'แบตเตอรี่',
+                      size: 'xxs',
+                      color: BENTO_THEME.textSecondary,
                       weight: 'bold',
-                      color: BENTO_THEME.textPrimary,
-                      flex: 0,
                     },
                     {
                       type: 'text',
-                      text: 'dBm',
-                      size: 'xs',
-                      color: BENTO_THEME.textSecondary,
+                      text: hasBattery ? `${batteryPercent}%` : '-',
+                      size: 'xxs',
+                      color: battColor,
+                      weight: 'bold',
+                    },
+                  ],
+                },
+                // Battery bar track (background)
+                {
+                  type: 'box',
+                  layout: 'vertical',
+                  margin: 'sm',
+                  height: '8px',
+                  cornerRadius: '9999px',
+                  backgroundColor: '#E2E8F0',
+                  contents: [
+                    // Battery bar fill
+                    {
+                      type: 'box',
+                      layout: 'vertical',
+                      width: hasBattery ? `${battFill}%` : '0%',
+                      height: '8px',
+                      cornerRadius: '9999px',
+                      backgroundColor: battColor,
+                      contents: [],
                     },
                   ],
                 },
                 {
-                  type: 'text',
-                  text: `การเอียง ${tiltDegrees}° (${tiltStatusText})`,
-                  size: 'xxs',
-                  color: Number(tiltDegrees) > 15 ? '#EF4444' : '#0284C7',
-                  weight: 'bold',
+                  type: 'box',
+                  layout: 'horizontal',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
                   margin: 'xs',
+                  contents: [
+                    {
+                      type: 'text',
+                      text: battLabel || '-',
+                      size: 'xxs',
+                      color: battColor,
+                      weight: 'bold',
+                    },
+                    ...(batteryVoltage != null ? [{
+                      type: 'text',
+                      text: `${batteryVoltage}V`,
+                      size: 'xxs',
+                      color: BENTO_THEME.textMuted,
+                    }] : []),
+                  ],
                 },
               ],
             },
           ],
         },
+        // 4. Secondary metrics: RSSI + Tilt (compact row)
+        ...((rssi != null || tiltDegrees != null) ? [{
+          type: 'box',
+          layout: 'horizontal',
+          spacing: 'sm',
+          margin: 'xs',
+          contents: [
+            ...(rssi != null ? [{
+              type: 'box',
+              layout: 'horizontal',
+              flex: 1,
+              alignItems: 'center',
+              backgroundColor: '#F1F5F9',
+              cornerRadius: '8px',
+              paddingAll: '8px',
+              spacing: 'xs',
+              contents: [
+                { type: 'text', text: 'RSSI', size: 'xxs', color: BENTO_THEME.textMuted, weight: 'bold', flex: 0 },
+                { type: 'text', text: `${rssi} dBm`, size: 'xxs', color: rssi > -75 ? '#10B981' : rssi > -90 ? '#F59E0B' : '#EF4444', weight: 'bold' },
+              ],
+            }] : []),
+            ...(tiltDegrees != null ? [{
+              type: 'box',
+              layout: 'horizontal',
+              flex: 1,
+              alignItems: 'center',
+              backgroundColor: '#F1F5F9',
+              cornerRadius: '8px',
+              paddingAll: '8px',
+              spacing: 'xs',
+              contents: [
+                { type: 'text', text: 'เอียง', size: 'xxs', color: BENTO_THEME.textMuted, weight: 'bold', flex: 0 },
+                { type: 'text', text: `${tiltDegrees}° (${tiltStatusText})`, size: 'xxs', color: Number(tiltDegrees) > 15 ? '#EF4444' : '#0284C7', weight: 'bold' },
+              ],
+            }] : []),
+          ],
+        }] : []),
       ],
     },
     // 4. Footer: Deep-link Call-to-Action
