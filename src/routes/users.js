@@ -16,6 +16,38 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// ── POST /api/users/register (or /api/auth/register) ───────────────────
+router.post('/register', async (req, res) => {
+  try {
+    const { name, email, password, phone, district, stationIds } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ success: false, error: 'กรุณากรอกชื่อ-นามสกุล' });
+    }
+    if (!email || !email.trim()) {
+      return res.status(400).json({ success: false, error: 'กรุณากรอกอีเมล' });
+    }
+    if (!password || password.length < 6) {
+      return res.status(400).json({ success: false, error: 'รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษร' });
+    }
+    const citizen = await userService.registerCitizenEmail({
+      name,
+      email,
+      password,
+      phone,
+      district,
+      stationIds,
+    });
+    res.status(201).json({
+      success: true,
+      data: citizen,
+      message: 'ลงทะเบียนประชาชนสำเร็จเรียบร้อยแล้ว',
+    });
+  } catch (err) {
+    console.error('[API /register] Error:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
 // ── POST /api/users/citizen-register ─────────────────────────────
 router.post('/citizen-register', async (req, res) => {
   try {

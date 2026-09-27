@@ -446,6 +446,60 @@ async function registerCitizen({ lineUserId, name, phone = '', district = '', st
   return formatUser(userRow);
 }
 
+/**
+ * Register a citizen user with Email and Password
+ */
+async function registerCitizenEmail({ name, email, password, phone = '', district = '', stationIds = [] }) {
+  if (!name || !name.trim()) {
+    throw new Error('กรุณากรอกชื่อ-นามสกุล');
+  }
+  if (!email || !email.trim()) {
+    throw new Error('กรุณากรอกอีเมล');
+  }
+  if (!password || password.length < 6) {
+    throw new Error('รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษร');
+  }
+
+  // Check duplicate email
+  const existing = await db.query(
+    `SELECT user_id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+    [email.trim()]
+  );
+  if (existing.rows.length > 0) {
+    throw new Error('อีเมลนี้ถูกใช้งานแล้วในระบบ');
+  }
+
+  const passwordHash = await bcrypt.hash(password.trim(), SALT_ROUNDS);
+
+  // If no stationIds provided, select active stations as default notification targets
+  let finalStationIds = stationIds;
+  if (!Array.isArray(finalStationIds) || finalStationIds.length === 0) {
+    try {
+      const activeStations = await db.query(`SELECT station_id FROM station WHERE status = 'active'`);
+      finalStationIds = activeStations.rows.map((s) => s.station_id);
+    } catch {
+      finalStationIds = [];
+    }
+  }
+
+  const res = await db.query(
+    `INSERT INTO users (
+      name, email, password_hash, phone, role, district, station_ids, is_active, created_at, updated_at
+    ) VALUES ($1, $2, $3, $4, 'citizen', $5, $6, true, NOW(), NOW())
+    RETURNING user_id, name, email, phone, role, district, line_user_id, station_ids, is_active, created_at, updated_at`,
+    [
+      name.trim(),
+      email.trim().toLowerCase(),
+      passwordHash,
+      phone.trim(),
+      district.trim(),
+      finalStationIds,
+    ]
+  );
+
+  return formatUser(res.rows[0]);
+}
+
 module.exports = {
   loginUser,
   getAllUsers,
@@ -458,4 +512,6 @@ module.exports = {
   getLineUserIdsForStation,
   getCitizenByLineId,
   registerCitizen,
+  registerCitizenEmail,
 };
+
