@@ -104,7 +104,7 @@ router.get('/', async (req, res) => {
         ORDER BY r.timestamp DESC
         LIMIT 1
       ) lr ON true
-      ORDER BY s.station_name
+      ORDER BY s.install_date ASC NULLS LAST, s.station_id ASC
     `;
     const result = await db.query(sql);
     res.json({ success: true, data: result.rows, count: result.rowCount });
@@ -550,6 +550,38 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ success: false, error: 'ไม่พบ Gateway ที่ระบุในระบบ' });
     }
     res.status(500).json({ success: false, error: err.message || 'Failed to create station' });
+  }
+});
+
+// ── DELETE /api/stations/:stationId ───────────────────────────────
+// Permanently delete station and cascade clean related tables
+router.delete('/:stationId', async (req, res) => {
+  const { stationId } = req.params;
+
+  try {
+    // 1. Check if station exists
+    const checkRes = await db.query('SELECT station_id, station_name FROM station WHERE station_id = $1', [stationId]);
+    if (checkRes.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'ไม่พบสถานีที่ต้องการลบในระบบ' });
+    }
+    const stationName = checkRes.rows[0].station_name;
+
+    // 2. Clean up notification settings and line subscriber preferences for this station
+    await db.query('DELETE FROM notification_settings WHERE station_id = $1', [stationId]);
+    await db.query('UPDATE line_subscribers SET station_ids = array_remove(station_ids, $1) WHERE $1 = ANY(station_ids)', [stationId]);
+
+    // 3. Delete station (cascades to readings, alerts, mcu, station_mapping)
+    await db.query('DELETE FROM station WHERE station_id = $1', [stationId]);
+
+    console.log(`[API DELETE /stations/${stationId}] Station "${stationName}" (${stationId}) deleted successfully`);
+    res.json({
+      success: true,
+      message: `ลบสถานี "${stationName}" (${stationId}) เรียบร้อยแล้ว`,
+      data: { station_id: stationId },
+    });
+  } catch (err) {
+    console.error(`[API DELETE /stations/${stationId}] Error:`, err.message);
+    res.status(500).json({ success: false, error: err.message || 'ไม่สามารถลบสถานีได้' });
   }
 });
 
