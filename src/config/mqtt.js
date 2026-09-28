@@ -5,11 +5,21 @@ const { processUplinkMessage } = require('../services/readingService');
 let client = null;
 
 /**
- * Connect to ChirpStack MQTT broker and subscribe to uplink events
+ * Connect to ChirpStack MQTT broker and subscribe to uplink events.
+ * If MQTT_BROKER is not explicitly set, MQTT is disabled and the system
+ * relies on ChirpStack HTTP Webhook Integration (POST /api/readings/webhook).
  */
 function connectMqtt() {
-  const brokerUrl = process.env.MQTT_BROKER || 'mqtt://localhost:1883';
-  const topic     = process.env.MQTT_TOPIC   || 'application/+/device/+/event/up';
+  const brokerUrl = process.env.MQTT_BROKER;
+
+  // Skip MQTT entirely if no broker is configured (e.g. Railway cloud deployment).
+  // Uplinks are received via ChirpStack HTTP Webhook instead.
+  if (!brokerUrl || brokerUrl.trim() === '') {
+    console.log('[MQTT] MQTT_BROKER not set — MQTT disabled. Using ChirpStack HTTP Webhook integration.');
+    return null;
+  }
+
+  const topic = process.env.MQTT_TOPIC || 'application/+/device/+/event/up';
 
   const options = {
     clientId: `water-monitor-backend-${Math.random().toString(16).slice(2, 8)}`,
@@ -82,9 +92,11 @@ function disconnectMqtt() {
 }
 
 /**
- * Get current connection status
+ * Get current connection status.
+ * Returns 'disabled' when MQTT_BROKER is not configured (HTTP Webhook mode).
  */
 function getMqttStatus() {
+  if (!process.env.MQTT_BROKER || process.env.MQTT_BROKER.trim() === '') return 'disabled (webhook mode)';
   if (!client) return 'not_initialized';
   if (client.connected) return 'connected';
   if (client.reconnecting) return 'reconnecting';

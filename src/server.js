@@ -42,9 +42,14 @@ async function startServer() {
     }
   }
 
-  // 2. Start MQTT subscriber
-  console.log('\n[Startup] Connecting to MQTT broker...');
-  connectMqtt();
+  // 2. Start MQTT subscriber (only when MQTT_BROKER is explicitly configured)
+  if (process.env.MQTT_BROKER && process.env.MQTT_BROKER.trim() !== '') {
+    console.log('\n[Startup] Connecting to MQTT broker...');
+    connectMqtt();
+  } else {
+    console.log('\n[Startup] MQTT_BROKER not configured — running in HTTP Webhook mode.');
+    console.log('[Startup] Uplinks will be received via POST /api/readings/webhook from ChirpStack HTTP Integration.');
+  }
 
   // 3. Start HTTP server
   const server = app.listen(PORT, () => {
