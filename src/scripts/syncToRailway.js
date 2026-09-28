@@ -124,6 +124,7 @@ async function runMirrorSync() {
       TRUNCATE TABLE
         readings,
         alerts,
+        gateway_mapping,
         station_mapping,
         mcu,
         station,
@@ -136,6 +137,7 @@ async function runMirrorSync() {
 
     // 4. Mirror all tables in foreign-key dependency order
     await mirrorTable('gateway');
+    await mirrorTable('gateway_mapping');
     await mirrorTable('station');
     await mirrorTable('mcu');
     await mirrorTable('station_mapping');
