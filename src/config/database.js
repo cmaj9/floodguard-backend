@@ -1,5 +1,18 @@
-const { Pool } = require('pg');
+process.env.TZ = 'Asia/Bangkok';
+const { Pool, types } = require('pg');
 require('dotenv').config();
+
+// Explicitly parse TIMESTAMP without time zone (OID 1114) as Asia/Bangkok (+07:00)
+// This guarantees that timestamps stored without timezone offset are ALWAYS unambiguously
+// parsed as Thailand time (UTC+7) across both Local and Cloud (Railway UTC Linux) environments.
+types.setTypeParser(1114, (stringValue) => {
+  if (!stringValue) return null;
+  const iso = stringValue.includes('T') ? stringValue : stringValue.replace(' ', 'T');
+  if (iso.endsWith('Z') || iso.includes('+') || (iso.length > 10 && iso.slice(10).includes('-'))) {
+    return new Date(iso);
+  }
+  return new Date(iso + '+07:00');
+});
 
 const poolConfig = process.env.DATABASE_URL
   ? {
@@ -25,9 +38,12 @@ const pool = new Pool({
   connectionTimeoutMillis: 5000,
 });
 
-// Test connection on startup
-pool.on('connect', () => {
+// Test connection on startup and enforce Asia/Bangkok session timezone
+pool.on('connect', (client) => {
   console.log('[DB] Connected to PostgreSQL');
+  client.query("SET timezone = 'Asia/Bangkok'").catch((err) => {
+    console.warn('[DB] Failed to set session timezone:', err.message);
+  });
 });
 
 pool.on('error', (err) => {

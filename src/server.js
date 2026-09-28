@@ -1,3 +1,4 @@
+process.env.TZ = 'Asia/Bangkok';
 require('dotenv').config();
 const app = require('./app');
 const { testConnection } = require('./config/database');
