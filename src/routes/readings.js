@@ -1,11 +1,30 @@
 const express = require('express');
 const router = express.Router();
 const {
+  processUplinkMessage,
   getLatestReadingsPerStation,
   getReadingsByStation,
   getReadingsInRange,
   exportReadingsToCSV,
 } = require('../services/readingService');
+
+// ── POST /api/readings/webhook or /api/readings/chirpstack ────────
+// ChirpStack HTTP Integration endpoint (allows ChirpStack to push uplinks directly to Cloud Backend)
+router.post(['/webhook', '/chirpstack'], async (req, res) => {
+  try {
+    const event = req.query.event || req.headers['x-chirpstack-event'] || 'up';
+    if (event !== 'up') {
+      return res.status(200).json({ success: true, message: `Ignored non-up event: ${event}` });
+    }
+    const topic = `application/webhook/device/webhook/event/${event}`;
+    const payloadBuffer = Buffer.from(JSON.stringify(req.body));
+    await processUplinkMessage(topic, payloadBuffer);
+    res.status(200).json({ success: true, message: 'ChirpStack uplink processed successfully' });
+  } catch (err) {
+    console.error('[API POST /readings/webhook] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 // ── GET /api/readings ─────────────────────────────────────────────
 // Returns latest reading for each active station (dashboard overview)
@@ -61,12 +80,29 @@ router.get('/history', async (req, res) => {
       s.location_name,
       s.sensor_to_ref_distance,
       s.reference_point_name,
+      s.warning_level,
+      s.critical_level,
       r.timestamp,
       r.raw_distance,
       COALESCE(
         r.water_level,
         CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
       ) AS water_level,
+      CASE
+        WHEN s.critical_level IS NOT NULL AND (
+          COALESCE(
+            r.water_level,
+            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+          ) >= s.critical_level
+        ) THEN 'critical'
+        WHEN s.warning_level IS NOT NULL AND (
+          COALESCE(
+            r.water_level,
+            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+          ) >= s.warning_level
+        ) THEN 'warning'
+        ELSE 'normal'
+      END AS water_status,
       r.is_blind_zone,
       r.temperature,
       r.humidity,
@@ -76,6 +112,18 @@ router.get('/history', async (req, res) => {
       r.snr,
       r.tilt_x,
       r.tilt_y,
+      s.tilt_offset_x::float AS tilt_offset_x,
+      s.tilt_offset_y::float AS tilt_offset_y,
+      ROUND((COALESCE(r.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))::numeric, 1)::float AS rel_tilt_x,
+      ROUND((COALESCE(r.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))::numeric, 1)::float AS rel_tilt_y,
+      ROUND(SQRT(
+        (COALESCE(r.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
+        (COALESCE(r.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
+      )::numeric, 1)::float AS relative_total_tilt,
+      (SQRT(
+        (COALESCE(r.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
+        (COALESCE(r.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
+      ) > 15) AS is_pole_tilted,
       r.latitude,
       r.longitude
     FROM readings r

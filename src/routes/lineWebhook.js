@@ -158,15 +158,7 @@ async function handleLineEvent(event) {
           COALESCE(
             CASE
               WHEN r.raw_distance IS NOT NULL THEN
-                ROUND((
-                  s.sensor_to_ref_distance - (
-                    CASE
-                      WHEN s.tilt_compensation_enabled = true AND (r.tilt_x IS NOT NULL OR r.tilt_y IS NOT NULL)
-                      THEN r.raw_distance * COS(SQRT(COALESCE(r.tilt_x, 0)^2 + COALESCE(r.tilt_y, 0)^2) * PI() / 180)
-                      ELSE r.raw_distance
-                    END
-                  )
-                )::numeric, 3)
+                ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3)
               ELSE r.water_level
             END,
             0

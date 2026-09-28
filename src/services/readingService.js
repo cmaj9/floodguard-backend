@@ -314,17 +314,9 @@ async function processUplinkMessage(topic, payloadBuffer) {
     console.warn('[ReadingService] Failed to fetch station calibration:', err.message);
   }
 
-  // Calculate relative water level: ΔL = D_ref - D_sensor
+  // Calculate relative water level: ΔL = D_ref - D_sensor (pure vertical distance)
   if (fields.raw_distance != null) {
-    let vertDistance = fields.raw_distance;
-    if (tiltCompensationEnabled && (fields.tilt_x != null || fields.tilt_y != null)) {
-      const tx = fields.tilt_x || 0;
-      const ty = fields.tilt_y || 0;
-      const totalTilt = Math.sqrt(tx * tx + ty * ty);
-      vertDistance = fields.raw_distance * Math.cos(totalTilt * (Math.PI / 180));
-    }
-
-    fields.water_level = parseFloat((sensorToRef - vertDistance).toFixed(3));
+    fields.water_level = parseFloat((sensorToRef - fields.raw_distance).toFixed(3));
     fields.is_blind_zone = fields.raw_distance <= blindZoneOffset;
   }
 
@@ -367,7 +359,25 @@ async function getLatestReadingsPerStation() {
       s.reference_point_name,
       r.timestamp,
       r.raw_distance,
-      r.water_level,
+      COALESCE(
+        r.water_level,
+        CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+      ) AS water_level,
+      CASE
+        WHEN s.critical_level IS NOT NULL AND (
+          COALESCE(
+            r.water_level,
+            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+          ) >= s.critical_level
+        ) THEN 'critical'
+        WHEN s.warning_level IS NOT NULL AND (
+          COALESCE(
+            r.water_level,
+            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+          ) >= s.warning_level
+        ) THEN 'warning'
+        ELSE 'normal'
+      END AS water_status,
       r.is_blind_zone,
       r.temperature,
       r.humidity,
@@ -399,9 +409,29 @@ async function getReadingsByStation(stationId, limit = 100, offset = 0) {
       s.station_name,
       s.sensor_to_ref_distance,
       s.reference_point_name,
+      s.warning_level,
+      s.critical_level,
       r.timestamp,
       r.raw_distance,
-      r.water_level,
+      COALESCE(
+        r.water_level,
+        CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+      ) AS water_level,
+      CASE
+        WHEN s.critical_level IS NOT NULL AND (
+          COALESCE(
+            r.water_level,
+            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+          ) >= s.critical_level
+        ) THEN 'critical'
+        WHEN s.warning_level IS NOT NULL AND (
+          COALESCE(
+            r.water_level,
+            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+          ) >= s.warning_level
+        ) THEN 'warning'
+        ELSE 'normal'
+      END AS water_status,
       r.is_blind_zone,
       r.temperature,
       r.humidity,
@@ -430,11 +460,27 @@ async function getReadingsInRange(stationId, startTime, endTime) {
   const sql = `
     SELECT
       r.reading_id, r.station_id, r.timestamp,
+      s.warning_level, s.critical_level,
       r.raw_distance,
       COALESCE(
         r.water_level,
         CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
       ) AS water_level,
+      CASE
+        WHEN s.critical_level IS NOT NULL AND (
+          COALESCE(
+            r.water_level,
+            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+          ) >= s.critical_level
+        ) THEN 'critical'
+        WHEN s.warning_level IS NOT NULL AND (
+          COALESCE(
+            r.water_level,
+            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+          ) >= s.warning_level
+        ) THEN 'warning'
+        ELSE 'normal'
+      END AS water_status,
       r.is_blind_zone,
       r.temperature, r.humidity,
       r.battery_voltage, r.battery_percent,
@@ -454,23 +500,15 @@ async function getReadingsInRange(stationId, startTime, endTime) {
  * Recalculate historical water_level and is_blind_zone for all readings of a station
  * when calibration parameters (sensor_to_ref_distance, tilt compensation, blind zone) change.
  */
-async function recalculateStationReadings(stationId, sensorToRef, tiltEnabled = true, blindZoneOffset = 0.28) {
+async function recalculateStationReadings(stationId, sensorToRef, _tiltEnabled = false, blindZoneOffset = 0.28) {
   const sql = `
     UPDATE readings
     SET
-      water_level = ROUND(
-        ($1 - (
-          CASE
-            WHEN $2 = true AND (tilt_x IS NOT NULL OR tilt_y IS NOT NULL)
-            THEN raw_distance * COS(SQRT(COALESCE(tilt_x, 0)^2 + COALESCE(tilt_y, 0)^2) * PI() / 180)
-            ELSE raw_distance
-          END
-        ))::numeric, 3
-      ),
-      is_blind_zone = (raw_distance <= $3)
-    WHERE station_id = $4 AND raw_distance IS NOT NULL
+      water_level = ROUND(($1 - raw_distance)::numeric, 3),
+      is_blind_zone = (raw_distance <= $2)
+    WHERE station_id = $3 AND raw_distance IS NOT NULL
   `;
-  const res = await db.query(sql, [Number(sensorToRef), Boolean(tiltEnabled), Number(blindZoneOffset), stationId]);
+  const res = await db.query(sql, [Number(sensorToRef), Number(blindZoneOffset), stationId]);
   console.log(`[ReadingService] Recalculated ${res.rowCount} readings for station ${stationId} with D_ref=${sensorToRef}m`);
   return res.rowCount;
 }

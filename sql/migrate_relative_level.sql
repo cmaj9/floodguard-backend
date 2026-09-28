@@ -7,6 +7,8 @@ ALTER TABLE station ADD COLUMN IF NOT EXISTS sensor_to_ref_distance FLOAT DEFAUL
 ALTER TABLE station ADD COLUMN IF NOT EXISTS reference_point_name VARCHAR(100) DEFAULT 'จุดอ้างอิง';
 ALTER TABLE station ADD COLUMN IF NOT EXISTS blind_zone_offset FLOAT DEFAULT 0.28;
 ALTER TABLE station ADD COLUMN IF NOT EXISTS tilt_compensation_enabled BOOLEAN DEFAULT true;
+ALTER TABLE station ADD COLUMN IF NOT EXISTS tilt_offset_x NUMERIC(5, 2) DEFAULT 0.0;
+ALTER TABLE station ADD COLUMN IF NOT EXISTS tilt_offset_y NUMERIC(5, 2) DEFAULT 0.0;
 
 -- Ensure default values for existing rows
 UPDATE station

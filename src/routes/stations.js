@@ -29,19 +29,13 @@ router.get('/', async (req, res) => {
         -- Latest reading (subquery)
         lr.timestamp        AS last_reading_time,
         lr.raw_distance,
-        -- Dynamically calculate relative water_level based on current sensor_to_ref_distance
+        s.tilt_offset_x::float AS tilt_offset_x,
+        s.tilt_offset_y::float AS tilt_offset_y,
+        -- Pure relative water_level based on current sensor_to_ref_distance - raw_distance
         COALESCE(
           CASE
             WHEN lr.raw_distance IS NOT NULL THEN
-              ROUND((
-                s.sensor_to_ref_distance - (
-                  CASE
-                    WHEN s.tilt_compensation_enabled = true AND (lr.tilt_x IS NOT NULL OR lr.tilt_y IS NOT NULL)
-                    THEN lr.raw_distance * COS(SQRT(COALESCE(lr.tilt_x, 0)^2 + COALESCE(lr.tilt_y, 0)^2) * PI() / 180)
-                    ELSE lr.raw_distance
-                  END
-                )
-              )::numeric, 3)
+              ROUND((s.sensor_to_ref_distance - lr.raw_distance)::numeric, 3)
             ELSE lr.water_level
           END,
           0
@@ -55,6 +49,16 @@ router.get('/', async (req, res) => {
         lr.snr,
         lr.tilt_x,
         lr.tilt_y,
+        ROUND((COALESCE(lr.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))::numeric, 1)::float AS rel_tilt_x,
+        ROUND((COALESCE(lr.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))::numeric, 1)::float AS rel_tilt_y,
+        ROUND(SQRT(
+          (COALESCE(lr.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
+          (COALESCE(lr.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
+        )::numeric, 1)::float AS relative_total_tilt,
+        (SQRT(
+          (COALESCE(lr.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
+          (COALESCE(lr.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
+        ) > 15) AS is_pole_tilted,
         -- Derive status from calculated relative water_level vs thresholds (if configured)
         CASE
           WHEN lr.raw_distance IS NULL AND lr.water_level IS NULL THEN 'unknown'
@@ -62,15 +66,7 @@ router.get('/', async (req, res) => {
             COALESCE(
               CASE
                 WHEN lr.raw_distance IS NOT NULL THEN
-                  ROUND((
-                    s.sensor_to_ref_distance - (
-                      CASE
-                        WHEN s.tilt_compensation_enabled = true AND (lr.tilt_x IS NOT NULL OR lr.tilt_y IS NOT NULL)
-                        THEN lr.raw_distance * COS(SQRT(COALESCE(lr.tilt_x, 0)^2 + COALESCE(lr.tilt_y, 0)^2) * PI() / 180)
-                        ELSE lr.raw_distance
-                      END
-                    )
-                  )::numeric, 3)
+                  ROUND((s.sensor_to_ref_distance - lr.raw_distance)::numeric, 3)
                 ELSE lr.water_level
               END,
               0
@@ -80,15 +76,7 @@ router.get('/', async (req, res) => {
             COALESCE(
               CASE
                 WHEN lr.raw_distance IS NOT NULL THEN
-                  ROUND((
-                    s.sensor_to_ref_distance - (
-                      CASE
-                        WHEN s.tilt_compensation_enabled = true AND (lr.tilt_x IS NOT NULL OR lr.tilt_y IS NOT NULL)
-                        THEN lr.raw_distance * COS(SQRT(COALESCE(lr.tilt_x, 0)^2 + COALESCE(lr.tilt_y, 0)^2) * PI() / 180)
-                        ELSE lr.raw_distance
-                      END
-                    )
-                  )::numeric, 3)
+                  ROUND((s.sensor_to_ref_distance - lr.raw_distance)::numeric, 3)
                 ELSE lr.water_level
               END,
               0
@@ -166,18 +154,12 @@ router.get('/:stationId', async (req, res) => {
         m.mcu_id, m.model, m.firmware_version, m.signal_strength, m.battery_level,
         lr.timestamp AS last_reading_time,
         lr.raw_distance,
+        s.tilt_offset_x::float AS tilt_offset_x,
+        s.tilt_offset_y::float AS tilt_offset_y,
         COALESCE(
           CASE
             WHEN lr.raw_distance IS NOT NULL THEN
-              ROUND((
-                s.sensor_to_ref_distance - (
-                  CASE
-                    WHEN s.tilt_compensation_enabled = true AND (lr.tilt_x IS NOT NULL OR lr.tilt_y IS NOT NULL)
-                    THEN lr.raw_distance * COS(SQRT(COALESCE(lr.tilt_x, 0)^2 + COALESCE(lr.tilt_y, 0)^2) * PI() / 180)
-                    ELSE lr.raw_distance
-                  END
-                )
-              )::numeric, 3)
+              ROUND((s.sensor_to_ref_distance - lr.raw_distance)::numeric, 3)
             ELSE lr.water_level
           END,
           0
@@ -187,21 +169,23 @@ router.get('/:stationId', async (req, res) => {
         lr.battery_voltage, lr.battery_percent,
         lr.rssi, lr.snr, lr.tilt_x, lr.tilt_y,
         lr.latitude AS reading_lat, lr.longitude AS reading_lng,
+        ROUND((COALESCE(lr.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))::numeric, 1)::float AS rel_tilt_x,
+        ROUND((COALESCE(lr.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))::numeric, 1)::float AS rel_tilt_y,
+        ROUND(SQRT(
+          (COALESCE(lr.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
+          (COALESCE(lr.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
+        )::numeric, 1)::float AS relative_total_tilt,
+        (SQRT(
+          (COALESCE(lr.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
+          (COALESCE(lr.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
+        ) > 15) AS is_pole_tilted,
         CASE
           WHEN lr.raw_distance IS NULL AND lr.water_level IS NULL THEN 'unknown'
           WHEN s.critical_level IS NOT NULL AND (
             COALESCE(
               CASE
                 WHEN lr.raw_distance IS NOT NULL THEN
-                  ROUND((
-                    s.sensor_to_ref_distance - (
-                      CASE
-                        WHEN s.tilt_compensation_enabled = true AND (lr.tilt_x IS NOT NULL OR lr.tilt_y IS NOT NULL)
-                        THEN lr.raw_distance * COS(SQRT(COALESCE(lr.tilt_x, 0)^2 + COALESCE(lr.tilt_y, 0)^2) * PI() / 180)
-                        ELSE lr.raw_distance
-                      END
-                    )
-                  )::numeric, 3)
+                  ROUND((s.sensor_to_ref_distance - lr.raw_distance)::numeric, 3)
                 ELSE lr.water_level
               END,
               0
@@ -211,15 +195,7 @@ router.get('/:stationId', async (req, res) => {
             COALESCE(
               CASE
                 WHEN lr.raw_distance IS NOT NULL THEN
-                  ROUND((
-                    s.sensor_to_ref_distance - (
-                      CASE
-                        WHEN s.tilt_compensation_enabled = true AND (lr.tilt_x IS NOT NULL OR lr.tilt_y IS NOT NULL)
-                        THEN lr.raw_distance * COS(SQRT(COALESCE(lr.tilt_x, 0)^2 + COALESCE(lr.tilt_y, 0)^2) * PI() / 180)
-                        ELSE lr.raw_distance
-                      END
-                    )
-                  )::numeric, 3)
+                  ROUND((s.sensor_to_ref_distance - lr.raw_distance)::numeric, 3)
                 ELSE lr.water_level
               END,
               0
@@ -299,6 +275,8 @@ router.put('/:stationId/calibration', async (req, res) => {
     critical_level,
     blind_zone_offset,
     tilt_compensation_enabled,
+    tilt_offset_x,
+    tilt_offset_y,
   } = req.body;
 
   try {
@@ -314,8 +292,10 @@ router.put('/:stationId/calibration', async (req, res) => {
         warning_level             = $3,
         critical_level            = $4,
         blind_zone_offset         = COALESCE($5, blind_zone_offset),
-        tilt_compensation_enabled = COALESCE($6, tilt_compensation_enabled)
-      WHERE station_id = $7
+        tilt_compensation_enabled = COALESCE($6, tilt_compensation_enabled),
+        tilt_offset_x             = COALESCE($7, tilt_offset_x),
+        tilt_offset_y             = COALESCE($8, tilt_offset_y)
+      WHERE station_id = $9
       RETURNING *
     `;
 
@@ -326,6 +306,8 @@ router.put('/:stationId/calibration', async (req, res) => {
       critical_level != null && !isNaN(Number(critical_level)) ? Number(critical_level) : null,
       blind_zone_offset != null && !isNaN(Number(blind_zone_offset)) ? Number(blind_zone_offset) : null,
       tilt_compensation_enabled != null ? Boolean(tilt_compensation_enabled) : null,
+      tilt_offset_x != null && !isNaN(Number(tilt_offset_x)) ? Number(tilt_offset_x) : null,
+      tilt_offset_y != null && !isNaN(Number(tilt_offset_y)) ? Number(tilt_offset_y) : null,
       stationId,
     ];
 
@@ -336,12 +318,11 @@ router.put('/:stationId/calibration', async (req, res) => {
 
     const updated = result.rows[0];
     const newSensorToRef = Number(updated.sensor_to_ref_distance);
-    const tiltEnabled = updated.tilt_compensation_enabled;
     const blindZone = updated.blind_zone_offset;
 
     let recalculatedCount = 0;
     try {
-      recalculatedCount = await recalculateStationReadings(stationId, newSensorToRef, tiltEnabled, blindZone);
+      recalculatedCount = await recalculateStationReadings(stationId, newSensorToRef, false, blindZone);
     } catch (recalcErr) {
       console.warn(`[API /stations/${stationId}/calibration] Recalculate warning:`, recalcErr.message);
     }
@@ -378,6 +359,8 @@ router.put('/:stationId', async (req, res) => {
     normal_max,
     blind_zone_offset,
     tilt_compensation_enabled,
+    tilt_offset_x,
+    tilt_offset_y,
   } = req.body;
 
   try {
@@ -401,8 +384,10 @@ router.put('/:stationId', async (req, res) => {
         max_level                 = COALESCE($11, max_level),
         normal_max                = COALESCE($12, normal_max),
         blind_zone_offset         = COALESCE($13, blind_zone_offset),
-        tilt_compensation_enabled = COALESCE($14, tilt_compensation_enabled)
-      WHERE station_id = $15
+        tilt_compensation_enabled = COALESCE($14, tilt_compensation_enabled),
+        tilt_offset_x             = COALESCE($15, tilt_offset_x),
+        tilt_offset_y             = COALESCE($16, tilt_offset_y)
+      WHERE station_id = $17
       RETURNING *
     `;
 
@@ -421,6 +406,8 @@ router.put('/:stationId', async (req, res) => {
       normal_max != null ? Number(normal_max) : null,
       blind_zone_offset != null ? Number(blind_zone_offset) : null,
       tilt_compensation_enabled != null ? Boolean(tilt_compensation_enabled) : null,
+      tilt_offset_x != null && !isNaN(Number(tilt_offset_x)) ? Number(tilt_offset_x) : null,
+      tilt_offset_y != null && !isNaN(Number(tilt_offset_y)) ? Number(tilt_offset_y) : null,
       stationId,
     ];
 
@@ -467,6 +454,8 @@ router.post('/', async (req, res) => {
     normal_max,
     blind_zone_offset,
     tilt_compensation_enabled,
+    tilt_offset_x,
+    tilt_offset_y,
     status,
   } = req.body;
 
@@ -508,13 +497,15 @@ router.post('/', async (req, res) => {
         location_name, latitude, longitude, install_date, status,
         sensor_to_ref_distance, reference_point_name,
         warning_level, critical_level, max_level, normal_max,
-        blind_zone_offset, tilt_compensation_enabled
+        blind_zone_offset, tilt_compensation_enabled,
+        tilt_offset_x, tilt_offset_y
       ) VALUES (
         $1, $2, $3, $4::"StationType",
         $5, $6, $7, NOW(), $8::"StationStatus",
         COALESCE($9, 2.0), $10,
         $11, $12, $13, $14,
-        COALESCE($15, 0.28), COALESCE($16, true)
+        COALESCE($15, 0.28), COALESCE($16, true),
+        COALESCE($17, 0.0), COALESCE($18, 0.0)
       )
       RETURNING *
     `;
@@ -536,6 +527,8 @@ router.post('/', async (req, res) => {
       normal_max != null ? Number(normal_max) : null,
       blind_zone_offset != null ? Number(blind_zone_offset) : 0.28,
       tilt_compensation_enabled != null ? Boolean(tilt_compensation_enabled) : true,
+      tilt_offset_x != null && !isNaN(Number(tilt_offset_x)) ? Number(tilt_offset_x) : 0.0,
+      tilt_offset_y != null && !isNaN(Number(tilt_offset_y)) ? Number(tilt_offset_y) : 0.0,
     ];
 
     const result = await db.query(sql, values);
