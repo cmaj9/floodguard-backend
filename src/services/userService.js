@@ -9,6 +9,12 @@ const DEFAULT_PASSWORD = 'demo1234';
  */
 function formatUser(row) {
   if (!row) return null;
+  const isSynthetic = Boolean(
+    row.email && (row.email.endsWith('@waterwatch.local') || row.email.endsWith('@floodguard.local'))
+  );
+  // User credentials are confirmed set if is_credentials_set is true, OR if role is staff/admin, AND email is not synthetic
+  const isCredentialsSet = (Boolean(row.is_credentials_set) || row.role === 'staff' || row.role === 'admin') && !isSynthetic;
+
   return {
     id: String(row.user_id),
     name: row.name,
@@ -22,6 +28,8 @@ function formatUser(row) {
     stationIds: row.station_ids || [],
     is_active: row.is_active !== false,
     isActive: row.is_active !== false,
+    is_credentials_set: isCredentialsSet,
+    isCredentialsSet: isCredentialsSet,
     created_at: row.created_at,
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
     updated_at: row.updated_at,
@@ -403,7 +411,7 @@ async function registerCitizen({ lineUserId, name, phone = '', district = '', st
            is_active = true,
            updated_at = NOW()
        WHERE line_user_id = $5
-       RETURNING user_id, name, email, phone, role, district, line_user_id, station_ids, is_active, created_at, updated_at`,
+       RETURNING user_id, name, email, phone, role, district, line_user_id, station_ids, is_active, is_credentials_set, created_at, updated_at`,
       [name || 'ประชาชนผู้ใช้งาน', phone, district, finalStationIds, lineUserId]
     );
     userRow = uRes.rows[0];
@@ -414,8 +422,8 @@ async function registerCitizen({ lineUserId, name, phone = '', district = '', st
 
     const iRes = await db.query(
       `INSERT INTO users (
-        name, email, password_hash, phone, role, district, line_user_id, station_ids, is_active, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, 'citizen', $5, $6, $7, true, NOW(), NOW())
+        name, email, password_hash, phone, role, district, line_user_id, station_ids, is_active, is_credentials_set, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, 'citizen', $5, $6, $7, true, false, NOW(), NOW())
       ON CONFLICT (email) DO UPDATE SET
         line_user_id = EXCLUDED.line_user_id,
         name = EXCLUDED.name,
@@ -424,7 +432,7 @@ async function registerCitizen({ lineUserId, name, phone = '', district = '', st
         station_ids = EXCLUDED.station_ids,
         is_active = true,
         updated_at = NOW()
-      RETURNING user_id, name, email, phone, role, district, line_user_id, station_ids, is_active, created_at, updated_at`,
+      RETURNING user_id, name, email, phone, role, district, line_user_id, station_ids, is_active, is_credentials_set, created_at, updated_at`,
       [name || 'ประชาชนผู้ใช้งาน', syntheticEmail, defaultHash, phone, district, lineUserId, finalStationIds]
     );
     userRow = iRes.rows[0];
@@ -484,9 +492,9 @@ async function registerCitizenEmail({ name, email, password, phone = '', distric
 
   const res = await db.query(
     `INSERT INTO users (
-      name, email, password_hash, phone, role, district, station_ids, is_active, created_at, updated_at
-    ) VALUES ($1, $2, $3, $4, 'citizen', $5, $6, true, NOW(), NOW())
-    RETURNING user_id, name, email, phone, role, district, line_user_id, station_ids, is_active, created_at, updated_at`,
+      name, email, password_hash, phone, role, district, station_ids, is_active, is_credentials_set, created_at, updated_at
+    ) VALUES ($1, $2, $3, $4, 'citizen', $5, $6, true, true, NOW(), NOW())
+    RETURNING user_id, name, email, phone, role, district, line_user_id, station_ids, is_active, is_credentials_set, created_at, updated_at`,
     [
       name.trim(),
       email.trim().toLowerCase(),
@@ -498,6 +506,71 @@ async function registerCitizenEmail({ name, email, password, phone = '', distric
   );
 
   return formatUser(res.rows[0]);
+}
+
+/**
+ * Set up real email and password for a citizen user
+ */
+async function setupCitizenCredentials({ userId, lineUserId, email, password }) {
+  if (!email || !email.trim()) {
+    throw new Error('กรุณากรอกอีเมล');
+  }
+  const cleanEmail = email.trim().toLowerCase();
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(cleanEmail)) {
+    throw new Error('รูปแบบอีเมลไม่ถูกต้อง');
+  }
+
+  if (!password || password.length < 6) {
+    throw new Error('รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษร');
+  }
+
+  // Find user by userId or lineUserId
+  let targetUser = null;
+  if (userId) {
+    const res = await db.query(
+      `SELECT * FROM users WHERE user_id = $1 LIMIT 1`,
+      [userId]
+    );
+    if (res.rows.length > 0) targetUser = res.rows[0];
+  }
+  if (!targetUser && lineUserId) {
+    const res = await db.query(
+      `SELECT * FROM users WHERE line_user_id = $1 LIMIT 1`,
+      [lineUserId]
+    );
+    if (res.rows.length > 0) targetUser = res.rows[0];
+  }
+
+  if (!targetUser) {
+    throw new Error('ไม่พบข้อมูลผู้ใช้งานในระบบ');
+  }
+
+  // Check if email is already taken by another user
+  const emailCheck = await db.query(
+    `SELECT user_id FROM users WHERE LOWER(email) = LOWER($1) AND user_id != $2 LIMIT 1`,
+    [cleanEmail, targetUser.user_id]
+  );
+  if (emailCheck.rows.length > 0) {
+    throw new Error('อีเมลนี้มีผู้ใช้งานแล้ว กรุณาใช้อีเมลอื่น');
+  }
+
+  // Hash new password
+  const passwordHash = await bcrypt.hash(password.trim(), SALT_ROUNDS);
+
+  // Update user
+  const updateRes = await db.query(
+    `UPDATE users
+     SET email = $1,
+         password_hash = $2,
+         is_credentials_set = true,
+         updated_at = NOW()
+     WHERE user_id = $3
+     RETURNING user_id, name, email, phone, role, district, line_user_id, station_ids, is_active, is_credentials_set, created_at, updated_at`,
+    [cleanEmail, passwordHash, targetUser.user_id]
+  );
+
+  return formatUser(updateRes.rows[0]);
 }
 
 module.exports = {
@@ -513,5 +586,6 @@ module.exports = {
   getCitizenByLineId,
   registerCitizen,
   registerCitizenEmail,
+  setupCitizenCredentials,
 };
 

@@ -73,6 +73,38 @@ router.post('/citizen-register', async (req, res) => {
   }
 });
 
+// ── POST /api/users/setup-credentials ─────────────────────────────
+router.post('/setup-credentials', async (req, res) => {
+  try {
+    const { userId, lineUserId, email, password } = req.body;
+    if (!email || !email.trim()) {
+      return res.status(400).json({ success: false, error: 'กรุณากรอกอีเมล' });
+    }
+    if (!password || password.length < 6) {
+      return res.status(400).json({ success: false, error: 'รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษร' });
+    }
+    if (!userId && !lineUserId) {
+      return res.status(400).json({ success: false, error: 'ไม่พบข้อมูลยืนยันตัวตนของผู้ใช้ (userId หรือ lineUserId)' });
+    }
+
+    const updatedUser = await userService.setupCitizenCredentials({
+      userId,
+      lineUserId,
+      email,
+      password,
+    });
+
+    res.json({
+      success: true,
+      data: updatedUser,
+      message: 'ตั้งค่าอีเมลและรหัสผ่านสำเร็จเรียบร้อยแล้ว',
+    });
+  } catch (err) {
+    console.error('[API /users/setup-credentials] Error:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
 // ── GET /api/users/citizen-status/:lineUserId ────────────────────
 router.get('/citizen-status/:lineUserId', async (req, res) => {
   try {

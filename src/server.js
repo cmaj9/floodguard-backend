@@ -36,6 +36,12 @@ async function startServer() {
         const { seedUsers } = require('./scripts/seedUsers');
         await seedUsers().catch((err) => console.warn('[Startup] Seed users note:', err.message));
         console.log('[Startup] [OK] Database auto-initialization complete!');
+      } else {
+        // Ensure is_credentials_set column exists in users table
+        await query(`
+          ALTER TABLE users 
+          ADD COLUMN IF NOT EXISTS is_credentials_set BOOLEAN NOT NULL DEFAULT FALSE;
+        `).catch((err) => console.warn('[Startup] Column check note:', err.message));
       }
     } catch (initErr) {
       console.error('[Startup] Auto-initialization error:', initErr.message);
