@@ -1,6 +1,6 @@
 const db = require('../config/database');
 const { sendLineAlert, formatAlertMessage, createAlertFlexMessage } = require('./lineService');
-const { getLineUserIdsForStation } = require('./userService');
+const { getLineUserIdsForStation, getLineRecipientsForAlert } = require('./userService');
 const { getSettings } = require('./notificationSettingService');
 
 const ALERT_COOLDOWN_MINUTES = parseInt(process.env.ALERT_COOLDOWN_MINUTES || '30', 10); // 30 min cooldown
@@ -80,8 +80,8 @@ async function saveAndNotify({ stationId, stationName, alertType, value, thresho
     const savedAlert = res.rows[0];
     console.log(`[AlertService] Alert created: ${savedAlert.alert_id} | ${alertType} | Station: ${stationId} | ${message}`);
 
-    // 3. Find LINE user IDs to notify
-    const lineUserIds = await getLineUserIdsForStation(stationId);
+    // 3. Find LINE user IDs to notify based on role & alert type
+    const lineUserIds = await getLineRecipientsForAlert(stationId, alertType);
     if (lineUserIds.length > 0) {
       // Build rich LINE Flex Message Carousel (3 Cards)
       const flexMsg = createAlertFlexMessage({
@@ -285,7 +285,118 @@ async function checkGeofence(station, fields, settings) {
 }
 
 /**
- * Check all reading-driven alerts (Conditions 1, 2, 4, 5)
+ * Check Condition: Online Recovery (สถานีกลับมาออนไลน์หรือกลับมาส่งข้อมูลอีกครั้งหลังขาดการติดต่อ)
+ * ตรวจสอบว่าก่อนหน้านี้มี Alert สถานะ 'offline' ที่ยังค้างอยู่ (active)
+ * หรือระยะเวลาห่างจากข้อมูลก่อนหน้าเกินเกณฑ์ timeout_minutes ที่กำหนดไว้หรือไม่
+ */
+async function checkOnlineRecovery(station, fields, settings, currentTimestamp) {
+  try {
+    if (settings.offline_timeout_enabled === false) return;
+
+    const timeoutMinutes = settings.offline_timeout_minutes || 30;
+
+    // 1. ตรวจสอบว่ามี Alert 'offline' ที่ยัง active ค้างอยู่หรือไม่
+    const activeOfflineRes = await db.query(
+      `SELECT alert_id, timestamp, value, threshold
+       FROM alerts
+       WHERE station_id = $1 AND alert_type = 'offline' AND status = 'active'
+       ORDER BY timestamp DESC
+       LIMIT 1`,
+      [station.station_id]
+    );
+
+    // 2. ตรวจสอบระยะเวลาห่างจากข้อมูลการตรวจวัดก่อนหน้า (ชุดข้อมูลก่อนหน้าแถวที่เพิ่งได้รับ)
+    const prevReadingRes = await db.query(
+      `SELECT timestamp
+       FROM readings
+       WHERE station_id = $1
+       ORDER BY timestamp DESC, reading_id DESC
+       OFFSET 1
+       LIMIT 1`,
+      [station.station_id]
+    );
+
+    let gapMinutes = 0;
+    if (prevReadingRes.rows.length > 0) {
+      gapMinutes = Math.round((new Date(currentTimestamp) - new Date(prevReadingRes.rows[0].timestamp)) / (1000 * 60));
+      if (gapMinutes < 0) gapMinutes = 0;
+    }
+
+    const hadActiveOfflineAlert = activeOfflineRes.rows.length > 0;
+    const exceededTimeoutGap = gapMinutes >= timeoutMinutes;
+
+    // หากเคยเกิด Alert offline ค้างอยู่ หรือเวลาที่ขาดหายไปเกิน timeoutMinutes
+    if (hadActiveOfflineAlert || exceededTimeoutGap) {
+      // คำนวณระยะเวลาที่ขาดหายไปเพื่อแสดงในข้อความแจ้งเตือน
+      let downtimeMinutes = gapMinutes;
+      if (hadActiveOfflineAlert && activeOfflineRes.rows[0].timestamp) {
+        const alertDowntime = Math.round((new Date(currentTimestamp) - new Date(activeOfflineRes.rows[0].timestamp)) / (1000 * 60));
+        if (alertDowntime > 0 && (!downtimeMinutes || alertDowntime > downtimeMinutes)) {
+          downtimeMinutes = alertDowntime;
+        }
+      }
+
+      let downtimeText = '';
+      if (downtimeMinutes >= 60) {
+        const hours = Math.floor(downtimeMinutes / 60);
+        const mins = downtimeMinutes % 60;
+        downtimeText = mins > 0 ? `${hours} ชั่วโมง ${mins} นาที` : `${hours} ชั่วโมง`;
+      } else {
+        downtimeText = `${Math.max(1, downtimeMinutes)} นาที`;
+      }
+
+      const recoveryMessage = `สถานีกลับมาเชื่อมต่อและส่งข้อมูลตามปกติ (หลังจากขาดการติดต่อไป ${downtimeText})`;
+
+      // 1. อัปเดตแจ้งเตือน Offline เดิมให้เป็น 'resolved'
+      if (hadActiveOfflineAlert) {
+        await db.query(
+          `UPDATE alerts
+           SET status = 'resolved'
+           WHERE station_id = $1 AND alert_type = 'offline' AND status = 'active'`,
+          [station.station_id]
+        );
+        console.log(`[AlertService] Resolved active offline alerts for station ${station.station_id}`);
+      }
+
+      // 2. บันทึกแจ้งเตือนใหม่ชนิด 'online' สถานะ 'resolved' ลงตาราง alerts
+      await db.query(
+        `INSERT INTO alerts (station_id, timestamp, alert_type, value, threshold, message, status)
+         VALUES ($1, NOW(), 'online', $2, NULL, $3, 'resolved')`,
+        [station.station_id, fields.water_level ?? null, recoveryMessage]
+      );
+      console.log(`[AlertService] Online recovery recorded for station ${station.station_id} | Downtime: ${downtimeText}`);
+
+      // 3. ส่งข้อความแจ้งเตือนทาง LINE OA ไปยังผู้ดูแลระบบและช่างเทคนิค (Zero-Emoji Policy)
+      const lineUserIds = await getLineRecipientsForAlert(station.station_id, 'online');
+      if (lineUserIds.length > 0) {
+        const flexMsg = createAlertFlexMessage({
+          stationName: station.station_name,
+          stationId: station.station_id,
+          alertType: 'online',
+          value: fields.water_level,
+          threshold: null,
+          customMessage: recoveryMessage,
+          refName: station.reference_point_name || 'จุดอ้างอิง',
+          station: {
+            ...station,
+            battery_percent: fields.battery_percent,
+            battery_voltage: fields.battery_voltage,
+            temperature: fields.temperature,
+            rssi: fields.rssi,
+            tilt_x: fields.tilt_x,
+          },
+        });
+
+        await sendLineAlert(lineUserIds, flexMsg);
+      }
+    }
+  } catch (err) {
+    console.error('[AlertService] checkOnlineRecovery error:', err.message);
+  }
+}
+
+/**
+ * Check all reading-driven alerts (Conditions 1, 2, 4, 5, and Online Recovery)
  * Skip entirely if station is not active (offline / maintenance)
  */
 async function checkReadingAlerts(stationId, fields, timestamp = new Date()) {
@@ -308,6 +419,9 @@ async function checkReadingAlerts(stationId, fields, timestamp = new Date()) {
 
     // Retrieve active notification thresholds (custom station settings or global)
     const settings = await getSettings(stationId);
+
+    // 0. Check Online Recovery if station was previously offline
+    await checkOnlineRecovery(station, fields, settings, timestamp);
 
     // Run checks concurrently
     await Promise.allSettled([

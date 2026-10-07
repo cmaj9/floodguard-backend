@@ -322,46 +322,87 @@ async function deactivateSubscriber(lineUserId) {
 }
 
 /**
- * Get line_user_ids for all recipients of a station:
- * 1. Users from `users` table (Staff/Admin with matching station or role='admin')
- * 2. General subscribers from `line_subscribers` table (is_active = true and matching station or all stations)
+ * Get line_user_ids filtered by alert type and role:
+ * 1. Public alerts ('water_level', 'rate_of_rise'):
+ *    - Admin: all stations
+ *    - Staff: assigned stations
+ *    - Citizens (users table & line_subscribers table): assigned stations or subscribed to all
+ * 2. Technical / hardware alerts ('battery', 'offline', 'online', 'tilt', 'geofence', 'sensor_drift'):
+ *    - Admin: ALWAYS receives all alerts across all stations without exception
+ *    - Staff: assigned stations
+ *    - Citizens: EXCLUDED (do not disturb general public)
  * Returns deduplicated array of line_user_ids
  */
-async function getLineUserIdsForStation(stationId) {
+async function getLineRecipientsForAlert(stationId, alertType = 'water_level') {
   try {
-    // 1. Staff and Admin users from `users` table
-    const usersRes = await db.query(
-      `SELECT line_user_id
-       FROM users
-       WHERE line_user_id IS NOT NULL
-         AND line_user_id != ''
-         AND is_active = true
-         AND ($1 = ANY(station_ids) OR role = 'admin')`,
-      [stationId]
-    );
+    const isPublicAlert = ['water_level', 'rate_of_rise'].includes(alertType);
 
-    // 2. LINE subscribers from `line_subscribers` table
-    const subsRes = await db.query(
-      `SELECT line_user_id
-       FROM line_subscribers
-       WHERE line_user_id IS NOT NULL
-         AND line_user_id != ''
-         AND is_active = true
-         AND ($1 = ANY(station_ids) OR cardinality(station_ids) = 0)`,
-      [stationId]
-    );
+    // 1. Fetch from `users` table
+    let userQuery = '';
+    const userParams = [stationId];
+
+    if (isPublicAlert) {
+      userQuery = `
+        SELECT line_user_id
+        FROM users
+        WHERE line_user_id IS NOT NULL
+          AND line_user_id != ''
+          AND is_active = true
+          AND (
+            role = 'admin'
+            OR $1 = ANY(station_ids)
+            OR (role = 'citizen' AND (cardinality(station_ids) = 0 OR station_ids IS NULL))
+          )
+      `;
+    } else {
+      // Technical alerts: Admin unconditionally, Staff for their assigned stations. Citizens excluded.
+      userQuery = `
+        SELECT line_user_id
+        FROM users
+        WHERE line_user_id IS NOT NULL
+          AND line_user_id != ''
+          AND is_active = true
+          AND (
+            role = 'admin'
+            OR (role = 'staff' AND $1 = ANY(station_ids))
+          )
+      `;
+    }
+
+    const usersRes = await db.query(userQuery, userParams);
+
+    // 2. Fetch from `line_subscribers` table (Public subscribers)
+    let subsRes = { rows: [] };
+    if (isPublicAlert) {
+      subsRes = await db.query(
+        `SELECT line_user_id
+         FROM line_subscribers
+         WHERE line_user_id IS NOT NULL
+           AND line_user_id != ''
+           AND is_active = true
+           AND ($1 = ANY(station_ids) OR cardinality(station_ids) = 0 OR station_ids IS NULL)`,
+        [stationId]
+      );
+    }
 
     const allIds = [
       ...usersRes.rows.map((r) => r.line_user_id),
       ...subsRes.rows.map((r) => r.line_user_id),
-    ];
+    ].filter(Boolean);
 
     // Deduplicate
     return [...new Set(allIds)];
   } catch (err) {
-    console.error('[UserService] Error getting LINE user IDs for station:', err.message);
+    console.error('[UserService] Error getting LINE recipients for alert:', err.message);
     return [];
   }
+}
+
+/**
+ * Backward-compatible helper for station-level alerts
+ */
+async function getLineUserIdsForStation(stationId) {
+  return getLineRecipientsForAlert(stationId, 'water_level');
 }
 
 
@@ -582,6 +623,7 @@ module.exports = {
   deleteUser,
   saveOrUpdateSubscriber,
   deactivateSubscriber,
+  getLineRecipientsForAlert,
   getLineUserIdsForStation,
   getCitizenByLineId,
   registerCitizen,

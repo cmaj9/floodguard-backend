@@ -8,8 +8,13 @@ All agents working in this repository must strictly adhere to semantic versionin
 
 Follow the standard Semantic Versioning (SemVer 2.0.0):
 * **MAJOR (`X.0.0`)**: Significant breaking changes, complete database schema resets, or incompatible API route redesigns.
-* **MINOR (`0.Y.0`)**: New features, new API endpoints, new services, or backward-compatible feature additions.
-* **PATCH (`0.0.Z`)**: Bug fixes, threshold tuning, query optimizations, dependency updates, or documentation updates.
+* **MINOR (`1.Y.0`)**: New features, new API endpoints, new services, or backward-compatible feature additions.
+* **PATCH (`1.Y.Z`)**: Bug fixes, threshold tuning, query optimizations, dependency updates, or documentation updates.
+
+### Patch Roll-over Limit (Max 10 per Minor Version - Mandatory):
+* เลข Patch (`Z`) **ต้องไม่เกิน 10** เสมอ (เช่น `1.0.0` ถึง `1.0.9` หรือเต็มที่ `1.0.10`)
+* เมื่อเลข Patch ถึง 10 หรือเริ่มรอบพัฒนาฟีเจอร์ใหม่ ให้ปัดขึ้นเป็นเลข Minor ถัดไปทันที (เช่น จาก `1.0.10` ให้ขยับเป็น `1.1.0` ทันที)
+* **ห้ามให้มีเลข Patch ที่สูงเกินกว่า 10 เด็ดขาด** (เช่น `1.0.11`, `1.0.21`, `1.0.33` ห้ามใช้งาน)
 
 ---
 

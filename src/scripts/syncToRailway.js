@@ -86,6 +86,7 @@ async function runMirrorSync() {
       `ALTER TYPE "AlertType" ADD VALUE IF NOT EXISTS 'rate_of_rise'`,
       `ALTER TYPE "AlertType" ADD VALUE IF NOT EXISTS 'geofence'`,
       `ALTER TYPE "AlertType" ADD VALUE IF NOT EXISTS 'offline'`,
+      `ALTER TYPE "AlertType" ADD VALUE IF NOT EXISTS 'online'`,
     ];
     for (const eq of enumQueries) {
       try { await targetPool.query(eq); } catch (_) {}

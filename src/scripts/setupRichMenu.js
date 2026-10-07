@@ -1,9 +1,9 @@
 /**
  * LINE Rich Menu Setup Script
  * Creates the Compact Rich Menu (2500x843 px) with 3 zones:
- * - Zone A (Left 2/3): Web Dashboard LIFF
- * - Zone B (Top Right 1/3): Node Status Summary Message ("ระดับน้ำ")
- * - Zone C (Bottom Right 1/3): Citizen Alert Settings & Registration LIFF
+ * - Zone 1 (Left 1/3, 0-833 px): เช็กระดับน้ำ (Message: "ระดับน้ำ" -> Instant Flex Summary)
+ * - Zone 2 (Center 1/3, 833-1667 px): แดชบอร์ด & แผนที่ (LIFF: /dashboard)
+ * - Zone 3 (Right 1/3, 1667-2500 px): รับแจ้งเตือนภัย (LIFF: /subscribe)
  *
  * Automatically uploads the image (rich_menu_2500x843.jpg) and sets as default.
  * Usage: node src/scripts/setupRichMenu.js
@@ -32,9 +32,9 @@ const richMenuPayload = {
         height: 843,
       },
       action: {
-        type: 'uri',
-        label: 'Web Dashboard',
-        uri: `https://liff.line.me/${LIFF_ID}`,
+        type: 'message',
+        label: 'เช็กระดับน้ำ',
+        text: 'ระดับน้ำ',
       },
     },
     {
@@ -45,9 +45,9 @@ const richMenuPayload = {
         height: 843,
       },
       action: {
-        type: 'message',
-        label: 'ตรวจสถานะโหนด',
-        text: 'ระดับน้ำ',
+        type: 'uri',
+        label: 'แดชบอร์ด & แผนที่',
+        uri: `https://liff.line.me/${LIFF_ID}/dashboard`,
       },
     },
     {
@@ -59,8 +59,8 @@ const richMenuPayload = {
       },
       action: {
         type: 'uri',
-        label: 'ตั้งค่าการแจ้งเตือน',
-        uri: `https://liff.line.me/${LIFF_ID}/register`,
+        label: 'รับแจ้งเตือนภัย',
+        uri: `https://liff.line.me/${LIFF_ID}/subscribe`,
       },
     },
   ],

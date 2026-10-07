@@ -11,4 +11,7 @@ ALTER TYPE "AlertType" ADD VALUE IF NOT EXISTS 'geofence';
 -- Add 'offline' type for when station stops sending data
 ALTER TYPE "AlertType" ADD VALUE IF NOT EXISTS 'offline';
 
+-- Add 'online' type for when station recovers and sends data again
+ALTER TYPE "AlertType" ADD VALUE IF NOT EXISTS 'online';
+
 SELECT 'alert types updated successfully!' AS message;

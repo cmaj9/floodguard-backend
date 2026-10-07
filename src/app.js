@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
+const path = require('path');
 const readingsRouter  = require('./routes/readings');
 const stationsRouter  = require('./routes/stations');
 const usersRouter      = require('./routes/users');
@@ -39,6 +40,9 @@ app.use(express.json({
   },
 }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Static assets (images, public assets for LINE Flex Messages)
+app.use('/public', express.static(path.join(__dirname, '../public')));
 
 // Request logger (development)
 if (process.env.NODE_ENV !== 'production') {

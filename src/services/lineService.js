@@ -188,6 +188,9 @@ function formatAlertMessage({ stationName, stationId, alertType, value, threshol
     case 'offline':
       header = '[แจ้งเตือนสถานีขาดการติดต่อ]';
       break;
+    case 'online':
+      header = '[แจ้งเตือนสถานีกลับมาออนไลน์]';
+      break;
     case 'battery':
       header = '[แจ้งเตือนแบตเตอรี่สถานีต่ำ]';
       break;
@@ -217,7 +220,7 @@ function formatAlertMessage({ stationName, stationId, alertType, value, threshol
 }
 
 // ============================================================
-// DESIGN SYSTEM TOKENS & THEMING (Rules: Zero-Emoji, Bento Grid, WCAG AA)
+// DESIGN SYSTEM TOKENS & THEMING (Rules: Zero-Emoji, Bento Grid, WCAG AA, Modern 2026 Palette)
 // ============================================================
 const BENTO_THEME = {
   bubbleBg: '#F8FAFC',
@@ -227,30 +230,38 @@ const BENTO_THEME = {
   textSecondary: '#64748B',
   textMuted: '#94A3B8',
   buttonDark: '#0F172A',
+  brandSky: '#0284C7',
   severity: {
     normal: {
-      color: '#10B981',
+      color: '#059669',
       badgeBg: '#ECFDF5',
       badgeBorder: '#A7F3D0',
-      dot: '#10B981',
+      dot: '#059669',
       label: 'สถานะปกติ',
     },
+    online: {
+      color: '#059669',
+      badgeBg: '#ECFDF5',
+      badgeBorder: '#A7F3D0',
+      dot: '#059669',
+      label: 'กลับมาออนไลน์',
+    },
     warning: {
-      color: '#F59E0B',
-      badgeBg: '#FFFBEB',
+      color: '#D97706',
+      badgeBg: '#FEF3C7',
       badgeBorder: '#FDE68A',
-      dot: '#F59E0B',
+      dot: '#D97706',
       label: 'เกณฑ์เฝ้าระวัง',
     },
     critical: {
-      color: '#EF4444',
-      badgeBg: '#FEF2F2',
-      badgeBorder: '#FECACA',
-      dot: '#EF4444',
-      label: 'สถานะวิกฤต',
+      color: '#DC2626',
+      badgeBg: '#FEE2E2',
+      badgeBorder: '#FCA5A5',
+      dot: '#DC2626',
+      label: 'ระดับวิกฤต',
     },
     offline: {
-      color: '#64748B',
+      color: '#475569',
       badgeBg: '#F1F5F9',
       badgeBorder: '#CBD5E1',
       dot: '#64748B',
@@ -260,9 +271,39 @@ const BENTO_THEME = {
 };
 
 /**
+ * Return public HTTPS URL of station photo (Master Node for ST-01 / ST-001)
+ */
+function getStationImageUrl(stationId) {
+  const normId = String(stationId || '').toUpperCase().trim();
+  if (normId === 'ST-001' || normId === 'ST-01' || normId.includes('01')) {
+    if (process.env.MASTER_NODE_IMAGE_URL && process.env.MASTER_NODE_IMAGE_URL.trim() !== '') {
+      return process.env.MASTER_NODE_IMAGE_URL.trim();
+    }
+    const webUrl = getWebUrl();
+    if (webUrl.startsWith('https://')) {
+      return `${webUrl}/master_node.jpeg`;
+    }
+    return 'https://waterwatch-frontend-mu.vercel.app/master_node.jpeg';
+  }
+  return null;
+}
+
+/**
+ * Return Google Maps search URL for station coordinates
+ */
+function getGoogleMapsUrl(station) {
+  const lat = station?.latitude ?? '14.035930';
+  const lng = station?.longitude ?? '100.725160';
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(lat)},${encodeURIComponent(lng)}`;
+}
+
+/**
  * Determine dynamic severity theme token
  */
 function getDynamicSeverityTheme(alertType, value, threshold) {
+  if (alertType === 'online') {
+    return BENTO_THEME.severity.online;
+  }
   if (alertType === 'offline') {
     return BENTO_THEME.severity.offline;
   }
@@ -306,6 +347,14 @@ function getSafetyProtocol(alertType, statusTheme) {
       { num: '4', title: 'ประสานงานกับผู้นำชุมชนหรือ ปภ. ทันที', desc: 'หากระดับน้ำยังคงเพิ่มขึ้นอย่างต่อเนื่อง' },
     ];
   }
+  if (alertType === 'online') {
+    return [
+      { num: '1', title: 'โหนดโทรมาตรกลับมาทำงานสมบูรณ์', desc: 'ระบบรับข้อมูลการตรวจวัดได้อย่างต่อเนื่อง' },
+      { num: '2', title: 'ตรวจสอบระดับน้ำและสถานะปัจจุบัน', desc: 'ข้อมูลระดับน้ำและพารามิเตอร์อัปเดตสด' },
+      { num: '3', title: 'ตรวจสอบแรงดันแบตเตอรี่และการชาร์จ', desc: 'เช็กความต่อเนื่องของพลังงานแผงโซลาร์' },
+      { num: '4', title: 'ระบบบันทึกประวัติการเชื่อมต่อแล้ว', desc: 'สามารถดูข้อมูลย้อนหลังบนระบบ FloodGuard' },
+    ];
+  }
   // Technical / Device alerts
   return [
     { num: '1', title: 'แจ้งเตือนทีมวิศวกรและช่างเทคนิคดูแลระบบ', desc: 'อุปกรณ์ IoT ตรวจพบสถานะผิดปกติทางเทคนิค' },
@@ -316,12 +365,12 @@ function getSafetyProtocol(alertType, statusTheme) {
 }
 
 /**
- * Create a premium LINE Flex Message (Bento Grid layout) adhering to system specification:
- * - Bubble background: #F8FAFC
- * - Sub-metrics cards: #FFFFFF, rounded 12px
- * - Dynamic severity theme (Normal #10B981, Warning #F59E0B, Critical #EF4444, Offline #64748B)
- * - Zero Unicode Emojis (Minimalist status capsules with geometric dots and clean typography)
- * - Prominent deep-link CTA button to live node dashboard
+ * Create a minimalist, high-impact LINE Flex Message adhering to Clean Whitespace Rhythm:
+ * - Zero Unicode Emojis (Minimalist status capsules and clean typography)
+ * - Hero metric with 5XL typography and baseline unit alignment
+ * - Clear station identification: Name (Code) and Location/Role subtext
+ * - Role-tailored action buttons (Disaster hotline for public emergencies; diagnostics & maps for staff/admin)
+ * - 100% valid LINE Flex Message v3 schema (No empty boxes, no invalid margins)
  */
 function createAlertFlexMessage({
   stationName,
@@ -334,438 +383,388 @@ function createAlertFlexMessage({
   station = null,
 }) {
   const deepLinkUrl = getLiffUrl(`/nodes/${encodeURIComponent(stationId)}`);
-  const timeStr = new Date().toLocaleString('th-TH', {
-    timeZone: 'Asia/Bangkok',
-    hour: '2-digit',
-    minute: '2-digit',
-    day: '2-digit',
-    month: 'short',
-  });
+  const googleMapsUrl = getGoogleMapsUrl(station);
 
-  const theme = getDynamicSeverityTheme(alertType, value, threshold);
+  const now = new Date();
+  const timeStr =
+    now.toLocaleDateString('th-TH', {
+      timeZone: 'Asia/Bangkok',
+      day: '2-digit',
+      month: 'short',
+    }) +
+    ' ' +
+    now.toLocaleTimeString('th-TH', {
+      timeZone: 'Asia/Bangkok',
+      hour: '2-digit',
+      minute: '2-digit',
+    }) +
+    ' น.';
 
-  // Format primary metric display
-  let primaryTitle = 'ระดับน้ำตรวจวัดล่าสุด';
-  let primaryValue = `${value ?? '-'}`;
-  let primaryUnit = 'ม. (รสม.)';
-  let comparisonText = customMessage || `เทียบกับ${refName}`;
+  const isPublicAlert = ['water_level', 'rate_of_rise'].includes(alertType);
+  const stationTitle = `${stationName || station?.station_name || 'สถานี'} (${stationId})`;
 
-  if (alertType === 'water_level') {
-    primaryTitle = 'ระดับน้ำตรวจวัดล่าสุด';
-    const numVal = Number(value || 0);
-    primaryValue = `${numVal >= 0 ? '+' : ''}${numVal.toFixed(2)}`;
-    primaryUnit = 'ม. (รสม.)';
-    if (threshold != null) {
-      const diff = numVal - Number(threshold);
-      comparisonText = diff >= 0
-        ? `สูงกว่าเกณฑ์ที่กำหนด +${diff.toFixed(2)} ม.`
-        : `ต่ำกว่าเกณฑ์ที่กำหนด ${Math.abs(diff).toFixed(2)} ม.`;
-    }
-  } else if (alertType === 'rate_of_rise') {
-    primaryTitle = 'อัตราน้ำเพิ่มสูงขึ้น';
-    primaryValue = `+${Number(value || 0).toFixed(2)}`;
-    primaryUnit = 'ม./ชม.';
-    comparisonText = `เกณฑ์กำหนด ${threshold ?? 0.3} ม./ชม.`;
-  } else if (alertType === 'offline') {
-    primaryTitle = 'ระยะเวลาไม่พบการติดต่อ';
-    primaryValue = `${value ?? threshold ?? 60}`;
-    primaryUnit = 'นาที';
-    comparisonText = 'ขาดสัญญาณตรวจวัดเกินเกณฑ์กำหนด';
-  } else if (alertType === 'battery') {
-    primaryTitle = 'ระดับแบตเตอรี่อุปกรณ์';
-    primaryValue = `${value ?? 0}`;
-    primaryUnit = '%';
-    comparisonText = `เกณฑ์แจ้งเตือน <= ${threshold ?? 20}%`;
-  } else if (alertType === 'geofence') {
-    primaryTitle = 'ระยะห่างจากพิกัดสมอ';
-    primaryValue = `${Number(value || 0).toFixed(1)}`;
-    primaryUnit = 'ม.';
-    comparisonText = `ระยะปลอดภัยกำหนดไม่เกิน ${threshold ?? 100} ม.`;
-  } else if (alertType === 'tilt') {
-    primaryTitle = 'องศาการเอียงของทุ่น';
-    primaryValue = `${Number(value || 0).toFixed(1)}`;
-    primaryUnit = 'องศา (°)';
-    comparisonText = 'องศาการเอียงเกินเกณฑ์ปลอดภัย';
+  let stationSubtitle = '';
+  if (isPublicAlert) {
+    const loc = [];
+    if (station?.subdistrict) loc.push(`ต.${station.subdistrict}`);
+    if (station?.district) loc.push(`อ.${station.district}`);
+    if (station?.province) loc.push(`จ.${station.province}`);
+    stationSubtitle = loc.length > 0 ? loc.join(' ') : (station?.location_name || 'สถานีโทรมาตรวัดระดับน้ำ');
+  } else {
+    stationSubtitle = 'เจ้าหน้าที่ผู้ดูแล / ช่างเทคนิค';
   }
 
-  // Telemetry sub-metrics — only use real values from the station object
-  const isStationOffline = alertType === 'offline';
-  const batteryPercent = Math.round(Number(station?.battery_percent ?? (alertType === 'battery' ? value : null)));
-  const batteryVoltage = station?.battery_voltage != null ? Number(station.battery_voltage).toFixed(2) : null;
-  const hasBattery = !isNaN(batteryPercent) && station?.battery_percent != null || alertType === 'battery';
-  const temperature = station?.temperature != null ? Number(station.temperature).toFixed(1) : null;
-  const rssi = station?.rssi != null ? Math.round(Number(station.rssi)) : null;
-  const tiltDegrees = station?.tilt_x != null ? Number(station.tilt_x).toFixed(1) : (alertType === 'tilt' ? Number(value).toFixed(1) : null);
-  const tiltStatusText = tiltDegrees != null ? (Number(tiltDegrees) > 15 ? 'เอียงผิดปกติ' : 'สมดุลปกติ') : '-';
-  const locationLabel = station?.location_name || 'สถานีโทรมาตรวัดระดับน้ำ';
+  let categoryTitle = 'แจ้งเตือนระดับน้ำ';
+  let badgeText = 'เฝ้าระวัง';
+  let themeColor = '#D97706';
+  let metricNumber = `${value ?? '-'}`;
+  let metricUnit = 'ม.';
+  let headlineText = customMessage || 'ตรวจพบค่าเกินเกณฑ์กำหนด';
+  let sublineText = 'โปรดตรวจสอบรายละเอียดในระบบ';
+  let buttons = [];
 
-  // Battery bar: calculate fill percentage (0-100), colour-coded
-  const battFill = hasBattery ? Math.min(100, Math.max(0, batteryPercent)) : 0;
-  const battColor = battFill > 50 ? '#10B981' : battFill > 20 ? '#F59E0B' : '#EF4444';
-  const battLabel = hasBattery ? (battFill > 50 ? 'พร้อมใช้งาน' : battFill > 20 ? 'แบตปานกลาง' : 'แบตต่ำ') : '-';
+  if (alertType === 'water_level') {
+    const numVal = Number(value || 0);
+    const critLvl = Number(station?.critical_level ?? threshold ?? 1.5);
+    const isCritical = numVal >= critLvl || (threshold != null && numVal >= Number(threshold));
 
-  // Temperature colour
-  const tempNum = temperature != null ? Number(temperature) : null;
-  const tempColor = tempNum == null ? '#94A3B8' : tempNum > 35 ? '#EF4444' : tempNum > 28 ? '#F59E0B' : '#10B981';
-  const tempLabel = tempNum == null ? '-' : tempNum > 35 ? 'ร้อนมาก' : tempNum > 28 ? 'ปกติ' : 'เย็น';
+    categoryTitle = 'แจ้งเตือนระดับน้ำ';
+    badgeText = isCritical ? 'อันตราย' : 'เฝ้าระวัง';
+    themeColor = isCritical ? '#DC2626' : '#D97706';
+    metricNumber = `${numVal >= 0 ? '+' : ''}${numVal.toFixed(2)}`;
+    metricUnit = 'ม.';
+
+    if (!customMessage) {
+      if (isCritical) {
+        const diff = numVal - critLvl;
+        headlineText = diff > 0 ? `น้ำล้นตลิ่งวิกฤต เกินเกณฑ์ +${diff.toFixed(2)} ม.` : 'ระดับน้ำแตะเกณฑ์วิกฤต';
+      } else {
+        headlineText = 'ระดับน้ำแตะเกณฑ์เฝ้าระวัง';
+      }
+    }
+    sublineText = isCritical
+      ? 'ระดับน้ำวิกฤต! โปรดเตรียมพร้อมอพยพทันที'
+      : 'โปรดเฝ้าระวังภัยและติดตามสถานการณ์ใกล้ชิด';
+
+    buttons.push({
+      type: 'button',
+      style: 'secondary',
+      height: 'sm',
+      color: '#F1F5F9',
+      action: {
+        type: 'uri',
+        label: 'เช็คสถานี',
+        uri: deepLinkUrl,
+      },
+    });
+
+    if (isCritical) {
+      buttons.push({
+        type: 'button',
+        style: 'primary',
+        height: 'sm',
+        color: '#DC2626',
+        action: {
+          type: 'uri',
+          label: 'โทรสายด่วน 1784 (ปภ.)',
+          uri: 'tel:1784',
+        },
+      });
+    }
+  } else if (alertType === 'rate_of_rise') {
+    const numVal = Number(value || 0);
+    categoryTitle = 'แจ้งเตือนระดับน้ำ';
+    badgeText = 'น้ำขึ้นเร็ว';
+    themeColor = '#DC2626';
+    metricNumber = `+${numVal.toFixed(2)}`;
+    metricUnit = 'ม./ชม.';
+    headlineText = customMessage || `อัตราน้ำเพิ่มเร็ว +${numVal.toFixed(2)} ม./ชม.`;
+    sublineText = 'น้ำขึ้นฉับพลัน! โปรดระวังน้ำท่วมขังและยกของขึ้นที่สูง';
+    buttons = [
+      {
+        type: 'button',
+        style: 'secondary',
+        height: 'sm',
+        color: '#F1F5F9',
+        action: { type: 'uri', label: 'เช็คสถานี', uri: deepLinkUrl },
+      },
+      {
+        type: 'button',
+        style: 'primary',
+        height: 'sm',
+        color: '#DC2626',
+        action: { type: 'uri', label: 'โทรสายด่วน 1784 (ปภ.)', uri: 'tel:1784' },
+      },
+    ];
+  } else if (alertType === 'battery') {
+    const battVal = Math.round(Number(value || station?.battery_percent || 0));
+    categoryTitle = 'แจ้งเตือนอุปกรณ์';
+    badgeText = 'แบตเตอรี่ต่ำ';
+    themeColor = '#D97706';
+    metricNumber = `${battVal}`;
+    metricUnit = '%';
+    headlineText = customMessage || 'แรงดันไฟฟ้าต่ำกว่าเกณฑ์ปกติ';
+    sublineText = 'โปรดตรวจสอบแผงโซลาร์เซลล์หรือเปลี่ยนแบตเตอรี่';
+    buttons = [
+      {
+        type: 'button',
+        style: 'secondary',
+        height: 'sm',
+        color: '#F1F5F9',
+        action: { type: 'uri', label: 'ตรวจสอบสถานี', uri: deepLinkUrl },
+      },
+      {
+        type: 'button',
+        style: 'secondary',
+        height: 'sm',
+        color: '#F1F5F9',
+        action: { type: 'uri', label: 'เปิดแผนที่นำทาง', uri: googleMapsUrl },
+      },
+    ];
+  } else if (alertType === 'offline') {
+    const mins = Math.round(Number(value || threshold || 30));
+    categoryTitle = 'แจ้งเตือนระบบ';
+    badgeText = 'ขาดการติดต่อ';
+    themeColor = '#64748B';
+    metricNumber = `${mins}`;
+    metricUnit = 'นาที';
+    headlineText = customMessage || `ไม่ได้รับสัญญาณเกินเกณฑ์ ${mins} นาที`;
+    sublineText = 'โปรดตรวจสอบการจ่ายไฟหรือสัญญาณเครือข่าย';
+    buttons = [
+      {
+        type: 'button',
+        style: 'secondary',
+        height: 'sm',
+        color: '#F1F5F9',
+        action: { type: 'uri', label: 'ตรวจสอบสถานี', uri: deepLinkUrl },
+      },
+      {
+        type: 'button',
+        style: 'secondary',
+        height: 'sm',
+        color: '#F1F5F9',
+        action: { type: 'uri', label: 'เปิดแผนที่นำทาง', uri: googleMapsUrl },
+      },
+    ];
+  } else if (alertType === 'online') {
+    categoryTitle = 'แจ้งเตือนระบบ';
+    badgeText = 'ออนไลน์แล้ว';
+    themeColor = '#059669';
+    metricNumber = 'ONLINE';
+    metricUnit = null;
+    headlineText = customMessage || 'สถานีกลับมาส่งข้อมูลตามปกติแล้ว';
+    sublineText = 'อุปกรณ์เชื่อมต่อสัญญาณและบันทึกข้อมูลเรียบร้อย';
+    buttons = [
+      {
+        type: 'button',
+        style: 'secondary',
+        height: 'sm',
+        color: '#F1F5F9',
+        action: { type: 'uri', label: 'ตรวจสอบสถานี', uri: deepLinkUrl },
+      },
+    ];
+  } else if (alertType === 'tilt') {
+    const tiltVal = Number(value || 0).toFixed(1);
+    categoryTitle = 'แจ้งเตือนอุปกรณ์';
+    badgeText = 'เสาเอียงผิดปกติ';
+    themeColor = '#D97706';
+    metricNumber = `${tiltVal}`;
+    metricUnit = '°';
+    headlineText = customMessage || `ตรวจพบมุมเอียง ${tiltVal}° เกินเกณฑ์`;
+    sublineText = 'โปรดตรวจสอบจุดยึดและโครงสร้างเสาหน้างาน';
+    buttons = [
+      {
+        type: 'button',
+        style: 'secondary',
+        height: 'sm',
+        color: '#F1F5F9',
+        action: { type: 'uri', label: 'ตรวจสอบสถานี', uri: deepLinkUrl },
+      },
+      {
+        type: 'button',
+        style: 'secondary',
+        height: 'sm',
+        color: '#F1F5F9',
+        action: { type: 'uri', label: 'เปิดแผนที่นำทาง', uri: googleMapsUrl },
+      },
+    ];
+  } else if (alertType === 'geofence') {
+    const distVal = Number(value || 0).toFixed(1);
+    categoryTitle = 'แจ้งเตือนอุปกรณ์';
+    badgeText = 'เคลื่อนที่ผิดปกติ';
+    themeColor = '#DC2626';
+    metricNumber = `${distVal}`;
+    metricUnit = 'ม.';
+    headlineText = customMessage || `ทุ่นลอยเคลื่อนที่ออกนอกพิกัด ${distVal} ม.`;
+    sublineText = 'โปรดตรวจสอบสมอยึดทุ่นทันที';
+    buttons = [
+      {
+        type: 'button',
+        style: 'secondary',
+        height: 'sm',
+        color: '#F1F5F9',
+        action: { type: 'uri', label: 'ตรวจสอบสถานี', uri: deepLinkUrl },
+      },
+      {
+        type: 'button',
+        style: 'secondary',
+        height: 'sm',
+        color: '#F1F5F9',
+        action: { type: 'uri', label: 'เปิดแผนที่นำทาง', uri: googleMapsUrl },
+      },
+    ];
+  }
 
   const bubble = {
     type: 'bubble',
     size: 'mega',
-    styles: {
-      body: {
-        backgroundColor: BENTO_THEME.bubbleBg,
-      },
-      footer: {
-        backgroundColor: BENTO_THEME.bubbleBg,
-      },
-    },
     body: {
       type: 'box',
       layout: 'vertical',
-      paddingAll: '20px',
-      spacing: 'md',
+      paddingAll: 'xl',
+      backgroundColor: '#FFFFFF',
       contents: [
-        // 1. Header: Dynamic Severity Status Pill & Detection Timestamp
+        // 1. Header Row
         {
           type: 'box',
           layout: 'horizontal',
           alignItems: 'center',
           contents: [
             {
+              type: 'text',
+              text: categoryTitle,
+              size: 'sm',
+              weight: 'bold',
+              color: themeColor,
+            },
+            {
               type: 'box',
-              layout: 'horizontal',
-              backgroundColor: theme.badgeBg,
-              borderColor: theme.badgeBorder,
-              borderWidth: '1px',
+              layout: 'vertical',
+              backgroundColor: themeColor,
               cornerRadius: '9999px',
               paddingTop: 'xs',
               paddingBottom: 'xs',
-              paddingStart: 'sm',
-              paddingEnd: 'sm',
-              alignItems: 'center',
-              spacing: 'xs',
+              paddingStart: 'md',
+              paddingEnd: 'md',
+              flex: 0,
               contents: [
                 {
-                  type: 'box',
-                  layout: 'vertical',
-                  width: '8px',
-                  height: '8px',
-                  cornerRadius: '9999px',
-                  backgroundColor: theme.dot,
-                  contents: [],
-                },
-                {
                   type: 'text',
-                  text: theme.label,
-                  color: theme.color,
+                  text: badgeText,
+                  color: '#FFFFFF',
                   size: 'xs',
                   weight: 'bold',
                 },
               ],
             },
-            {
-              type: 'text',
-              text: `${timeStr} น.`,
-              color: BENTO_THEME.textSecondary,
-              size: 'xxs',
-              align: 'end',
-              gravity: 'center',
-            },
           ],
         },
-        // Node Name & ID
+        // 2. Station Block (Clean Whitespace: margin xl)
         {
           type: 'box',
           layout: 'vertical',
-          margin: 'xs',
+          alignItems: 'center',
+          margin: 'xl',
           contents: [
             {
               type: 'text',
-              text: stationName || stationId,
+              text: stationTitle,
               weight: 'bold',
-              size: 'xl',
-              color: BENTO_THEME.textPrimary,
+              size: 'md',
+              color: '#1E293B',
+              align: 'center',
               wrap: true,
             },
-            {
-              type: 'text',
-              text: `NODE-${stationId} · ${locationLabel}`,
-              size: 'xs',
-              color: BENTO_THEME.textSecondary,
-              margin: 'xs',
-            },
+            ...(stationSubtitle
+              ? [
+                  {
+                    type: 'text',
+                    text: stationSubtitle,
+                    size: 'xs',
+                    color: '#64748B',
+                    align: 'center',
+                    margin: 'xs',
+                  },
+                ]
+              : []),
           ],
         },
-        // 2. Hero Box: Primary Sensor Value (Large Typography)
+        // 3. Hero Metric Block (Clean Whitespace: margin xxl)
+        {
+          type: 'box',
+          layout: 'baseline',
+          justifyContent: 'center',
+          spacing: 'xs',
+          margin: 'xxl',
+          contents: [
+            {
+              type: 'text',
+              text: metricNumber,
+              size: metricNumber === 'ONLINE' ? '4xl' : '5xl',
+              weight: 'bold',
+              color: themeColor,
+              flex: 0,
+            },
+            ...(metricUnit
+              ? [
+                  {
+                    type: 'text',
+                    text: metricUnit,
+                    size: 'md',
+                    weight: 'bold',
+                    color: '#64748B',
+                    flex: 0,
+                  },
+                ]
+              : []),
+          ],
+        },
+        // 4. Alert Message Block (Clean Whitespace: margin md)
         {
           type: 'box',
           layout: 'vertical',
-          backgroundColor: BENTO_THEME.cardBg,
-          borderColor: BENTO_THEME.cardBorder,
-          borderWidth: '1px',
-          cornerRadius: '12px',
-          paddingAll: '16px',
-          margin: 'sm',
+          alignItems: 'center',
+          margin: 'md',
           contents: [
             {
-              type: 'box',
-              layout: 'horizontal',
-              contents: [
-                {
-                  type: 'text',
-                  text: primaryTitle,
-                  color: BENTO_THEME.textSecondary,
-                  size: 'xs',
-                  weight: 'bold',
-                },
-                {
-                  type: 'text',
-                  text: 'SENSOR METRIC',
-                  color: BENTO_THEME.textMuted,
-                  size: 'xxs',
-                  align: 'end',
-                  weight: 'bold',
-                },
-              ],
+              type: 'text',
+              text: headlineText,
+              color: themeColor,
+              weight: 'bold',
+              size: 'sm',
+              align: 'center',
             },
-            {
-              type: 'box',
-              layout: 'baseline',
-              spacing: 'xs',
-              margin: 'sm',
-              contents: [
-                {
-                  type: 'text',
-                  text: primaryValue,
-                  size: '3xl',
-                  weight: 'bold',
-                  color: theme.color,
-                  flex: 0,
-                },
-                {
-                  type: 'text',
-                  text: primaryUnit,
-                  size: 'sm',
-                  weight: 'bold',
-                  color: BENTO_THEME.textSecondary,
-                  margin: 'sm',
-                },
-              ],
-            },
-            {
-              type: 'box',
-              layout: 'horizontal',
-              margin: 'sm',
-              backgroundColor: BENTO_THEME.bubbleBg,
-              cornerRadius: '6px',
-              paddingAll: '8px',
-              contents: [
-                {
-                  type: 'text',
-                  text: comparisonText,
-                  color: '#475569',
-                  size: 'xs',
-                  wrap: true,
-                },
-              ],
-            },
+            ...(sublineText
+              ? [
+                  {
+                    type: 'text',
+                    text: sublineText,
+                    color: '#64748B',
+                    size: 'xs',
+                    align: 'center',
+                    wrap: true,
+                    margin: 'xs',
+                  },
+                ]
+              : []),
           ],
         },
-        // 3. Sub-Metrics Grid — Priority: Temperature (left) + Battery Bar (right)
+        // 5. Action Buttons Block (Clean Whitespace: margin xxl)
         {
           type: 'box',
-          layout: 'horizontal',
+          layout: 'vertical',
           spacing: 'sm',
-          margin: 'sm',
-          contents: [
-            // LEFT: Temperature
-            {
-              type: 'box',
-              layout: 'vertical',
-              flex: 1,
-              backgroundColor: BENTO_THEME.cardBg,
-              borderColor: BENTO_THEME.cardBorder,
-              borderWidth: '1px',
-              cornerRadius: '12px',
-              paddingAll: '12px',
-              contents: [
-                {
-                  type: 'text',
-                  text: 'อุณหภูมิ',
-                  size: 'xxs',
-                  color: BENTO_THEME.textSecondary,
-                  weight: 'bold',
-                },
-                {
-                  type: 'box',
-                  layout: 'horizontal',
-                  alignItems: 'center',
-                  spacing: 'xs',
-                  margin: 'xs',
-                  contents: [
-                    {
-                      type: 'text',
-                      text: temperature != null ? `${temperature}` : '-',
-                      size: 'xl',
-                      weight: 'bold',
-                      color: tempColor,
-                      flex: 0,
-                    },
-                    ...(temperature != null ? [{
-                      type: 'text',
-                      text: '°C',
-                      size: 'xs',
-                      color: BENTO_THEME.textSecondary,
-                    }] : []),
-                  ],
-                },
-                {
-                  type: 'text',
-                  text: tempLabel || '-',
-                  size: 'xxs',
-                  color: tempColor,
-                  weight: 'bold',
-                  margin: 'xs',
-                },
-              ],
-            },
-            // RIGHT: Battery Bar Gauge
-            {
-              type: 'box',
-              layout: 'vertical',
-              flex: 1,
-              backgroundColor: BENTO_THEME.cardBg,
-              borderColor: BENTO_THEME.cardBorder,
-              borderWidth: '1px',
-              cornerRadius: '12px',
-              paddingAll: '12px',
-              contents: [
-                {
-                  type: 'box',
-                  layout: 'horizontal',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  contents: [
-                    {
-                      type: 'text',
-                      text: 'แบตเตอรี่',
-                      size: 'xxs',
-                      color: BENTO_THEME.textSecondary,
-                      weight: 'bold',
-                    },
-                    {
-                      type: 'text',
-                      text: hasBattery ? `${batteryPercent}%` : '-',
-                      size: 'xxs',
-                      color: battColor,
-                      weight: 'bold',
-                    },
-                  ],
-                },
-                // Battery bar track (background)
-                {
-                  type: 'box',
-                  layout: 'vertical',
-                  margin: 'sm',
-                  height: '8px',
-                  cornerRadius: '9999px',
-                  backgroundColor: '#E2E8F0',
-                  contents: [
-                    // Battery bar fill
-                    {
-                      type: 'box',
-                      layout: 'vertical',
-                      width: hasBattery ? `${battFill}%` : '0%',
-                      height: '8px',
-                      cornerRadius: '9999px',
-                      backgroundColor: battColor,
-                      contents: [],
-                    },
-                  ],
-                },
-                {
-                  type: 'box',
-                  layout: 'horizontal',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  margin: 'xs',
-                  contents: [
-                    {
-                      type: 'text',
-                      text: battLabel || '-',
-                      size: 'xxs',
-                      color: battColor,
-                      weight: 'bold',
-                    },
-                    ...(batteryVoltage != null ? [{
-                      type: 'text',
-                      text: `${batteryVoltage}V`,
-                      size: 'xxs',
-                      color: BENTO_THEME.textMuted,
-                    }] : []),
-                  ],
-                },
-              ],
-            },
-          ],
+          margin: 'xxl',
+          contents: buttons,
         },
-        // 4. Secondary metrics: RSSI + Tilt (compact row)
-        ...((rssi != null || tiltDegrees != null) ? [{
-          type: 'box',
-          layout: 'horizontal',
-          spacing: 'sm',
-          margin: 'xs',
-          contents: [
-            ...(rssi != null ? [{
-              type: 'box',
-              layout: 'horizontal',
-              flex: 1,
-              alignItems: 'center',
-              backgroundColor: '#F1F5F9',
-              cornerRadius: '8px',
-              paddingAll: '8px',
-              spacing: 'xs',
-              contents: [
-                { type: 'text', text: 'RSSI', size: 'xxs', color: BENTO_THEME.textMuted, weight: 'bold', flex: 0 },
-                { type: 'text', text: `${rssi} dBm`, size: 'xxs', color: rssi > -75 ? '#10B981' : rssi > -90 ? '#F59E0B' : '#EF4444', weight: 'bold' },
-              ],
-            }] : []),
-            ...(tiltDegrees != null ? [{
-              type: 'box',
-              layout: 'horizontal',
-              flex: 1,
-              alignItems: 'center',
-              backgroundColor: '#F1F5F9',
-              cornerRadius: '8px',
-              paddingAll: '8px',
-              spacing: 'xs',
-              contents: [
-                { type: 'text', text: 'เอียง', size: 'xxs', color: BENTO_THEME.textMuted, weight: 'bold', flex: 0 },
-                { type: 'text', text: `${tiltDegrees}° (${tiltStatusText})`, size: 'xxs', color: Number(tiltDegrees) > 15 ? '#EF4444' : '#0284C7', weight: 'bold' },
-              ],
-            }] : []),
-          ],
-        }] : []),
-      ],
-    },
-    // 4. Footer: Deep-link Call-to-Action
-    footer: {
-      type: 'box',
-      layout: 'vertical',
-      paddingAll: '20px',
-      paddingTop: '0px',
-      contents: [
+        // 6. Footer Timestamp (Clean Whitespace: margin lg)
         {
-          type: 'button',
-          action: {
-            type: 'uri',
-            label: 'เปิดดูสดบน Dashboard',
-            uri: deepLinkUrl,
-          },
-          style: 'primary',
-          color: BENTO_THEME.buttonDark,
-          height: 'sm',
+          type: 'text',
+          text: `${timeStr} • ${isPublicAlert ? 'ระบบแจ้งเตือนอัตโนมัติ' : 'ฝ่ายบำรุงรักษา'}`,
+          size: 'xxs',
+          color: '#94A3B8',
+          align: 'center',
+          margin: 'lg',
         },
       ],
     },
@@ -773,7 +772,7 @@ function createAlertFlexMessage({
 
   return {
     type: 'flex',
-    altText: `[FloodGuard] ${theme.label}: ${stationName || stationId} (${primaryValue} ${primaryUnit})`,
+    altText: `[FloodGuard] ${categoryTitle} (${badgeText}): ${stationTitle} ${metricNumber}${metricUnit || ''}`,
     contents: bubble,
   };
 }
@@ -847,6 +846,8 @@ function createStatusSummaryFlexMessage(stations = []) {
     const warnDisplay = st.warning_level != null ? `${Number(st.warning_level) >= 0 ? '+' : ''}${Number(st.warning_level).toFixed(2)} ม.` : '-';
     const critDisplay = st.critical_level != null ? `${Number(st.critical_level) >= 0 ? '+' : ''}${Number(st.critical_level).toFixed(2)} ม.` : '-';
 
+    const cardHero = getStationImageUrl(st.station_id);
+
     return {
       type: 'bubble',
       size: 'mega',
@@ -854,6 +855,15 @@ function createStatusSummaryFlexMessage(stations = []) {
         body: { backgroundColor: BENTO_THEME.bubbleBg },
         footer: { backgroundColor: BENTO_THEME.bubbleBg },
       },
+      ...(cardHero ? {
+        hero: {
+          type: 'image',
+          url: cardHero,
+          size: 'full',
+          aspectRatio: '16:9',
+          aspectMode: 'cover',
+        },
+      } : {}),
       body: {
         type: 'box',
         layout: 'vertical',
@@ -967,8 +977,9 @@ function createStatusSummaryFlexMessage(stations = []) {
       footer: {
         type: 'box',
         layout: 'vertical',
-        paddingAll: '18px',
+        paddingAll: '16px',
         paddingTop: '0px',
+        spacing: 'xs',
         contents: [
           {
             type: 'button',
@@ -979,6 +990,17 @@ function createStatusSummaryFlexMessage(stations = []) {
               type: 'uri',
               label: 'เปิดดูสดบน Dashboard',
               uri: getLiffUrl(`/nodes/${encodeURIComponent(st.station_id)}`),
+            },
+          },
+          {
+            type: 'button',
+            style: 'link',
+            color: BENTO_THEME.brandSky,
+            height: 'sm',
+            action: {
+              type: 'uri',
+              label: 'เปิดแผนที่พิกัดสถานี',
+              uri: getGoogleMapsUrl(st),
             },
           },
         ],

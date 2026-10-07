@@ -30,9 +30,12 @@ async function ensureTable() {
   try {
     await db.query(createTableSql);
 
-    // Ensure StationStatus enum supports 'offline'
+    // Ensure StationStatus enum supports 'offline' and AlertType supports 'online'
     try {
       await db.query(`ALTER TYPE "StationStatus" ADD VALUE IF NOT EXISTS 'offline'`);
+    } catch (_) {}
+    try {
+      await db.query(`ALTER TYPE "AlertType" ADD VALUE IF NOT EXISTS 'online'`);
     } catch (_) {}
 
     // Ensure notification cooldown / repeat frequency columns exist
