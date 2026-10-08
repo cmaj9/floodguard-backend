@@ -27,9 +27,51 @@ function getDistanceInMeters(lat1, lon1, lat2, lon2) {
 
 /**
  * Check if a similar active alert was already triggered recently (cooldown)
+ * Supports severity escalation ('warning' -> 'critical' bypasses cooldown)
  */
-async function isAlertOnCooldown(stationId, alertType, cooldownMinutes = ALERT_COOLDOWN_MINUTES) {
+async function isAlertOnCooldown(stationId, alertType, cooldownMinutes = ALERT_COOLDOWN_MINUTES, severity = null) {
   try {
+    // For water_level alerts, handle Warning vs Critical distinction and Escalation
+    if (alertType === 'water_level' && severity) {
+      const res = await db.query(
+        `SELECT alert_id, timestamp, threshold, message
+         FROM alerts
+         WHERE station_id = $1
+           AND alert_type = 'water_level'
+         ORDER BY timestamp DESC
+         LIMIT 1`,
+        [stationId]
+      );
+
+      if (res.rows.length > 0) {
+        const lastAlert = res.rows[0];
+        const lastIsCritical = lastAlert.message?.includes('วิกฤต') || false;
+
+        // ESCALATION RULE: Transition from Warning to Critical ALWAYS bypasses cooldown!
+        if (severity === 'critical' && !lastIsCritical) {
+          console.log(`[AlertService] Escalation from Warning to Critical for ${stationId}: bypassing cooldown`);
+          return false;
+        }
+      }
+
+      // Check if the same severity level was triggered within cooldownMinutes
+      const resCooldown = await db.query(
+        `SELECT alert_id
+         FROM alerts
+         WHERE station_id = $1
+           AND alert_type = 'water_level'
+           AND timestamp >= NOW() - ($2 || ' minutes')::INTERVAL
+           AND (
+             ($3 = 'critical' AND message LIKE '%วิกฤต%')
+             OR ($3 = 'warning' AND message LIKE '%เฝ้าระวัง%')
+           )
+         LIMIT 1`,
+        [stationId, cooldownMinutes, severity]
+      );
+      return resCooldown.rows.length > 0;
+    }
+
+    // Default cooldown check for other alert types
     const res = await db.query(
       `SELECT alert_id, timestamp
        FROM alerts
@@ -50,13 +92,13 @@ async function isAlertOnCooldown(stationId, alertType, cooldownMinutes = ALERT_C
 /**
  * Save alert to database and dispatch LINE Flex notifications to subscribed users
  */
-async function saveAndNotify({ stationId, stationName, alertType, value, threshold, message, refName, station, cooldownMinutes }) {
+async function saveAndNotify({ stationId, stationName, alertType, severity = null, value, threshold, message, refName, station, cooldownMinutes }) {
   try {
     const effectiveCooldown = cooldownMinutes || ALERT_COOLDOWN_MINUTES;
-    // 1. Check cooldown to avoid flooding users
-    const onCooldown = await isAlertOnCooldown(stationId, alertType, effectiveCooldown);
+    // 1. Check cooldown to avoid flooding users (with severity escalation support)
+    const onCooldown = await isAlertOnCooldown(stationId, alertType, effectiveCooldown, severity);
     if (onCooldown) {
-      console.log(`[AlertService] Alert ${alertType} for ${stationId} is on cooldown (< ${effectiveCooldown}m), skipping duplicate`);
+      console.log(`[AlertService] Alert ${alertType} (${severity || 'normal'}) for ${stationId} is on cooldown (< ${effectiveCooldown}m), skipping duplicate`);
       return null;
     }
 
@@ -78,7 +120,7 @@ async function saveAndNotify({ stationId, stationName, alertType, value, thresho
     );
 
     const savedAlert = res.rows[0];
-    console.log(`[AlertService] Alert created: ${savedAlert.alert_id} | ${alertType} | Station: ${stationId} | ${message}`);
+    console.log(`[AlertService] Alert created: ${savedAlert.alert_id} | ${alertType} (${severity || 'default'}) | Station: ${stationId} | ${message}`);
 
     // 3. Find LINE user IDs to notify based on role & alert type
     const lineUserIds = await getLineRecipientsForAlert(stationId, alertType);
@@ -88,6 +130,7 @@ async function saveAndNotify({ stationId, stationName, alertType, value, thresho
         stationName: stationName || stationInfo?.station_name || stationId,
         stationId,
         alertType,
+        severity,
         value,
         threshold,
         customMessage: message,
@@ -109,6 +152,9 @@ async function saveAndNotify({ stationId, stationName, alertType, value, thresho
 
 /**
  * Check Condition 1: Water Level Safety Thresholds
+ * - Warning Level: Triggers when water_level >= warning_level (without offset reduction)
+ * - Critical Level: Triggers when water_level >= critical_level - safety_offset (early warning)
+ * - Escalation: Escalation from Warning to Critical bypasses cooldown immediately
  */
 async function checkWaterLevel(station, fields, settings) {
   if (settings.water_level_enabled === false) return;
@@ -117,9 +163,10 @@ async function checkWaterLevel(station, fields, settings) {
   const current = fields.water_level;
   const refName = station.reference_point_name || 'จุดอ้างอิง';
   const offset = settings.safety_offset || 0.0;
+  const cooldownMin = settings.water_level_cooldown_minutes || 30;
   const formatLevel = (val) => (val >= 0 ? `+${val.toFixed(2)}` : val.toFixed(2));
 
-  // Critical check (threshold adjusted by safety offset if set)
+  // 1. Critical check (threshold adjusted by safety offset if set)
   if (station.critical_level != null) {
     const effectiveCritical = Number(station.critical_level) - offset;
     if (current >= effectiveCritical) {
@@ -127,23 +174,29 @@ async function checkWaterLevel(station, fields, settings) {
         ? `สูงกว่า${refName} ${Math.abs(current).toFixed(2)} ม.`
         : `ต่ำกว่า${refName} ${Math.abs(current).toFixed(2)} ม.`;
 
+      const isEarlyWarning = offset > 0 && current < Number(station.critical_level);
+      const headline = isEarlyWarning
+        ? `ระดับน้ำใกล้แตะจุดวิกฤต (เผื่อความปลอดภัย ${offset.toFixed(2)} ม.)`
+        : `ระดับน้ำแตะเกณฑ์วิกฤต`;
+
       await saveAndNotify({
         stationId: station.station_id,
         stationName: station.station_name,
         alertType: 'water_level',
+        severity: 'critical',
         value: current,
         threshold: station.critical_level,
         refName,
-        cooldownMinutes: settings.water_level_cooldown_minutes || 30,
-        message: `ระดับน้ำแตะเกณฑ์วิกฤต ${formatLevel(current)} ม. (${relativeDesc}) แตะเกณฑ์ ${formatLevel(station.critical_level)} ม.`,
+        cooldownMinutes: cooldownMin,
+        message: `${headline} ${formatLevel(current)} ม. (${relativeDesc}) แตะเกณฑ์ ${formatLevel(station.critical_level)} ม.`,
       });
       return;
     }
   }
 
-  // Warning check
+  // 2. Warning check (Safety Offset NOT applied to warning level, per user specification)
   if (station.warning_level != null) {
-    const effectiveWarning = Number(station.warning_level) - offset;
+    const effectiveWarning = Number(station.warning_level);
     if (current >= effectiveWarning) {
       const relativeDesc = current >= 0
         ? `สูงกว่า${refName} ${Math.abs(current).toFixed(2)} ม.`
@@ -153,10 +206,11 @@ async function checkWaterLevel(station, fields, settings) {
         stationId: station.station_id,
         stationName: station.station_name,
         alertType: 'water_level',
+        severity: 'warning',
         value: current,
         threshold: station.warning_level,
         refName,
-        cooldownMinutes: settings.water_level_cooldown_minutes || 30,
+        cooldownMinutes: cooldownMin,
         message: `ระดับน้ำแตะเกณฑ์เฝ้าระวัง ${formatLevel(current)} ม. (${relativeDesc}) แตะเกณฑ์ ${formatLevel(station.warning_level)} ม.`,
       });
     }
@@ -173,6 +227,7 @@ async function checkBlindZone(station, fields, settings = {}) {
       stationId: station.station_id,
       stationName: station.station_name,
       alertType: 'water_level',
+      severity: 'blind_zone',
       value: fields.raw_distance,
       threshold: limit,
       refName: station.reference_point_name,
@@ -554,4 +609,5 @@ module.exports = {
   getAlerts,
   acknowledgeAlert,
   saveAndNotify,
+  checkWaterLevel,
 };

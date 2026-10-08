@@ -29,4 +29,17 @@ router.patch('/:alertId/acknowledge', async (req, res) => {
   }
 });
 
+// ── POST /api/alerts/broadcast-summary ─────────────────────────────
+router.post('/broadcast-summary', async (req, res) => {
+  try {
+    const { sendDailyWaterSummary } = require('../services/schedulerService');
+    const period = req.body?.period || 'manual';
+    const result = await sendDailyWaterSummary(period);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    console.error('[API /alerts/broadcast-summary] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;

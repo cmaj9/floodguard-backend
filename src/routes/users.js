@@ -134,6 +134,21 @@ router.get('/', async (req, res) => {
   }
 });
 
+// ── POST /api/users/change-password ──────────────────────────────
+router.post('/change-password', async (req, res) => {
+  try {
+    const { userId, currentPassword, newPassword } = req.body;
+    if (!userId) {
+      return res.status(400).json({ success: false, error: 'ไม่พบรหัสผู้ใช้' });
+    }
+    const result = await userService.changePassword(userId, currentPassword, newPassword);
+    res.json({ success: true, data: result, message: result.message });
+  } catch (err) {
+    console.error('[API /users/change-password] Error:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
 // ── GET /api/users/:id ────────────────────────────────────────────
 router.get('/:id', async (req, res) => {
   try {
@@ -151,6 +166,9 @@ router.get('/:id', async (req, res) => {
 // ── POST /api/users ───────────────────────────────────────────────
 router.post('/', async (req, res) => {
   try {
+    if (req.body.password && req.body.password.trim().length < 6) {
+      return res.status(400).json({ success: false, error: 'รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษร' });
+    }
     const user = await userService.createUser(req.body);
     res.status(201).json({ success: true, data: user, message: 'สร้างผู้ใช้สำเร็จ' });
   } catch (err) {
@@ -162,6 +180,9 @@ router.post('/', async (req, res) => {
 // ── PUT /api/users/:id ────────────────────────────────────────────
 router.put('/:id', async (req, res) => {
   try {
+    if (req.body.password && req.body.password.trim().length < 6) {
+      return res.status(400).json({ success: false, error: 'รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษร' });
+    }
     const user = await userService.updateUser(req.params.id, req.body);
     res.json({ success: true, data: user, message: 'อัปเดตข้อมูลผู้ใช้สำเร็จ' });
   } catch (err) {

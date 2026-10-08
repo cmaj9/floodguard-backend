@@ -300,7 +300,10 @@ function getGoogleMapsUrl(station) {
 /**
  * Determine dynamic severity theme token
  */
-function getDynamicSeverityTheme(alertType, value, threshold) {
+/**
+ * Determine dynamic severity theme token
+ */
+function getDynamicSeverityTheme(alertType, value, threshold, severity = null) {
   if (alertType === 'online') {
     return BENTO_THEME.severity.online;
   }
@@ -308,6 +311,12 @@ function getDynamicSeverityTheme(alertType, value, threshold) {
     return BENTO_THEME.severity.offline;
   }
   if (alertType === 'water_level') {
+    if (severity === 'warning') {
+      return BENTO_THEME.severity.warning;
+    }
+    if (severity === 'critical') {
+      return BENTO_THEME.severity.critical;
+    }
     if (value != null && threshold != null && Number(value) < Number(threshold)) {
       return BENTO_THEME.severity.warning;
     }
@@ -324,7 +333,7 @@ function getDynamicSeverityTheme(alertType, value, threshold) {
  */
 function getSafetyProtocol(alertType, statusTheme) {
   if (alertType === 'water_level') {
-    if (statusTheme.color === '#EF4444') {
+    if (statusTheme.color === '#EF4444' || statusTheme.color === '#DC2626') {
       return [
         { num: '1', title: 'ขนย้ายทรัพย์สินและเครื่องใช้ไฟฟ้าขึ้นที่สูงทันที', desc: 'ตัดระบบไฟฟ้าชั้นล่างเพื่อป้องกันไฟฟ้ารั่ว' },
         { num: '2', title: 'เตรียมกระเป๋าฉุกเฉิน ยา และน้ำดื่มสะอาด', desc: 'เก็บเอกสารสำคัญในถุงกันน้ำให้พร้อมเดินทาง' },
@@ -381,6 +390,7 @@ function createAlertFlexMessage({
   customMessage,
   refName = 'จุดอ้างอิง',
   station = null,
+  severity = null,
 }) {
   const deepLinkUrl = getLiffUrl(`/nodes/${encodeURIComponent(stationId)}`);
   const googleMapsUrl = getGoogleMapsUrl(station);
@@ -425,8 +435,10 @@ function createAlertFlexMessage({
 
   if (alertType === 'water_level') {
     const numVal = Number(value || 0);
-    const critLvl = Number(station?.critical_level ?? threshold ?? 1.5);
-    const isCritical = numVal >= critLvl || (threshold != null && numVal >= Number(threshold));
+    const critLvl = Number(station?.critical_level ?? 1.5);
+    const isCritical = severity
+      ? severity === 'critical'
+      : (station?.critical_level != null ? numVal >= Number(station.critical_level) : numVal >= 1.5);
 
     categoryTitle = 'แจ้งเตือนระดับน้ำ';
     badgeText = isCritical ? 'อันตราย' : 'เฝ้าระวัง';
@@ -642,10 +654,10 @@ function createAlertFlexMessage({
               layout: 'vertical',
               backgroundColor: themeColor,
               cornerRadius: '9999px',
-              paddingTop: 'xs',
-              paddingBottom: 'xs',
-              paddingStart: 'md',
-              paddingEnd: 'md',
+              paddingTop: '3px',
+              paddingBottom: '3px',
+              paddingStart: '10px',
+              paddingEnd: '10px',
               flex: 0,
               contents: [
                 {
@@ -654,6 +666,7 @@ function createAlertFlexMessage({
                   color: '#FFFFFF',
                   size: 'xs',
                   weight: 'bold',
+                  gravity: 'center',
                 },
               ],
             },
@@ -668,12 +681,28 @@ function createAlertFlexMessage({
           contents: [
             {
               type: 'text',
-              text: stationTitle,
-              weight: 'bold',
-              size: 'md',
-              color: '#1E293B',
               align: 'center',
               wrap: true,
+              contents: [
+                {
+                  type: 'span',
+                  text: `${stationName || station?.station_name || 'สถานี'} `,
+                  weight: 'bold',
+                  size: 'md',
+                  color: '#1E293B',
+                },
+                ...(stationId
+                  ? [
+                      {
+                        type: 'span',
+                        text: `(${stationId})`,
+                        size: 'xs',
+                        color: '#64748B',
+                        weight: 'regular',
+                      },
+                    ]
+                  : []),
+              ],
             },
             ...(stationSubtitle
               ? [
@@ -779,10 +808,22 @@ function createAlertFlexMessage({
 
 /**
  * Create a rich status summary Flex Message Carousel for checking all stations (Zero Emojis, Bento Grid)
+ * Supports options.period: 'morning' | 'evening' for scheduled daily reports
  */
-function createStatusSummaryFlexMessage(stations = []) {
+function createStatusSummaryFlexMessage(stations = [], options = {}) {
+  const { period = null } = options;
   const webUrl = getWebUrl();
   const timeStr = new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+
+  let periodHeader = 'สถานการณ์ระดับน้ำล่าสุด';
+  let altText = 'รายงานข้อมูลระดับน้ำล่าสุด FloodGuard';
+  if (period === 'morning') {
+    periodHeader = 'สรุปสถานการณ์น้ำภาคเช้า';
+    altText = 'รายงานสรุปสถานการณ์น้ำประจำวันช่วงเช้า (07:00 น.) — FloodGuard';
+  } else if (period === 'evening') {
+    periodHeader = 'สรุปสถานการณ์น้ำภาคเย็น';
+    altText = 'รายงานสรุปสถานการณ์น้ำประจำวันช่วงเย็น (18:00 น.) — FloodGuard';
+  }
 
   if (stations.length === 0) {
     const emptyBubble = {
@@ -798,7 +839,7 @@ function createStatusSummaryFlexMessage(stations = []) {
         paddingAll: '20px',
         contents: [
           { type: 'text', text: 'FLOODGUARD STATUS', color: '#0284C7', size: 'xxs', weight: 'bold' },
-          { type: 'text', text: 'สถานการณ์ระดับน้ำล่าสุด', color: BENTO_THEME.textPrimary, size: 'lg', weight: 'bold', margin: 'xs' },
+          { type: 'text', text: periodHeader, color: BENTO_THEME.textPrimary, size: 'lg', weight: 'bold', margin: 'xs' },
           { type: 'text', text: 'ขณะนี้ไม่มีข้อมูลสถานีที่เปิดให้บริการในระบบ', color: BENTO_THEME.textSecondary, size: 'sm', margin: 'md' },
         ],
       },
@@ -882,12 +923,13 @@ function createStatusSummaryFlexMessage(stations = []) {
                 borderColor: statusTheme.badgeBorder,
                 borderWidth: '1px',
                 cornerRadius: '9999px',
-                paddingTop: 'xs',
-                paddingBottom: 'xs',
-                paddingStart: 'sm',
-                paddingEnd: 'sm',
+                paddingTop: '3px',
+                paddingBottom: '3px',
+                paddingStart: '8px',
+                paddingEnd: '8px',
                 alignItems: 'center',
                 spacing: 'xs',
+                flex: 0,
                 contents: [
                   {
                     type: 'box',
@@ -896,6 +938,7 @@ function createStatusSummaryFlexMessage(stations = []) {
                     height: '6px',
                     cornerRadius: '9999px',
                     backgroundColor: statusTheme.dot,
+                    flex: 0,
                     contents: [],
                   },
                   {
@@ -904,20 +947,44 @@ function createStatusSummaryFlexMessage(stations = []) {
                     color: statusTheme.color,
                     size: 'xxs',
                     weight: 'bold',
+                    gravity: 'center',
+                    flex: 0,
                   },
                 ],
               },
-              { type: 'text', text: `อัปเดต ${timeStr} น.`, color: BENTO_THEME.textSecondary, size: 'xxs', align: 'end' },
+              {
+                type: 'text',
+                text: period === 'morning' ? `สรุปเช้า ${timeStr} น.` : period === 'evening' ? `สรุปเย็น ${timeStr} น.` : `อัปเดต ${timeStr} น.`,
+                color: BENTO_THEME.textSecondary,
+                size: 'xxs',
+                align: 'end',
+              },
             ],
           },
           {
             type: 'text',
-            text: st.station_name || st.station_id,
-            color: BENTO_THEME.textPrimary,
-            size: 'lg',
-            weight: 'bold',
             margin: 'xs',
             wrap: true,
+            contents: [
+              {
+                type: 'span',
+                text: `${st.station_name || st.station_id} `,
+                color: BENTO_THEME.textPrimary,
+                size: 'lg',
+                weight: 'bold',
+              },
+              ...(st.station_name && st.station_id
+                ? [
+                    {
+                      type: 'span',
+                      text: `(${st.station_id})`,
+                      color: BENTO_THEME.textSecondary,
+                      size: 'xs',
+                      weight: 'regular',
+                    },
+                  ]
+                : []),
+            ],
           },
           // Hero Metric Box
           {
@@ -1010,7 +1077,7 @@ function createStatusSummaryFlexMessage(stations = []) {
 
   return {
     type: 'flex',
-    altText: 'รายงานข้อมูลระดับน้ำล่าสุด FloodGuard',
+    altText,
     contents: {
       type: 'carousel',
       contents: stationCards,
@@ -1052,12 +1119,13 @@ function createWelcomeFlexMessage(displayName = 'ผู้ใช้ LINE', userI
           borderColor: badgeTheme.badgeBorder,
           borderWidth: '1px',
           cornerRadius: '9999px',
-          paddingTop: 'xs',
-          paddingBottom: 'xs',
-          paddingStart: 'sm',
-          paddingEnd: 'sm',
+          paddingTop: '3px',
+          paddingBottom: '3px',
+          paddingStart: '8px',
+          paddingEnd: '8px',
           alignItems: 'center',
           spacing: 'xs',
+          flex: 0,
           contents: [
             {
               type: 'box',
@@ -1066,6 +1134,7 @@ function createWelcomeFlexMessage(displayName = 'ผู้ใช้ LINE', userI
               height: '8px',
               cornerRadius: '9999px',
               backgroundColor: badgeTheme.dot,
+              flex: 0,
               contents: [],
             },
             {
@@ -1074,6 +1143,8 @@ function createWelcomeFlexMessage(displayName = 'ผู้ใช้ LINE', userI
               color: badgeTheme.color,
               size: 'xs',
               weight: 'bold',
+              gravity: 'center',
+              flex: 0,
             },
           ],
         },

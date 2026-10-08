@@ -84,10 +84,18 @@ async function startServer() {
   // Initial check after 10s
   setTimeout(() => checkOfflineStations().catch(() => {}), 10000);
 
-  // 5. Graceful shutdown
+  // 5. Initialize daily morning (07:00) & evening (18:00) automated water summary scheduler
+  const { initScheduler } = require('./services/schedulerService');
+  const schedulerTasks = initScheduler();
+
+  // 6. Graceful shutdown
   const shutdown = (signal) => {
     console.log(`\n[Shutdown] Received ${signal}. Shutting down gracefully...`);
     clearInterval(offlineCheckTimer);
+    try {
+      schedulerTasks?.morningTask?.stop();
+      schedulerTasks?.eveningTask?.stop();
+    } catch (_) {}
     disconnectMqtt();
     server.close(() => {
       console.log('[Shutdown] HTTP server closed');

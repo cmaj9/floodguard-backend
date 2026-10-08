@@ -142,6 +142,11 @@ async function createUser(data) {
     throw new Error('อีเมลนี้ถูกใช้งานแล้วในระบบ');
   }
 
+  if (password && password.trim()) {
+    if (password.trim().length < 6) {
+      throw new Error('รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษร');
+    }
+  }
   const rawPassword = (password && password.trim()) ? password.trim() : DEFAULT_PASSWORD;
   const passwordHash = await bcrypt.hash(rawPassword, SALT_ROUNDS);
 
@@ -234,10 +239,16 @@ async function updateUser(userId, data) {
     userId,
   ];
 
-  if (password && password.trim()) {
-    const newHash = await bcrypt.hash(password.trim(), SALT_ROUNDS);
-    params.push(newHash);
-    passwordHashClause = `, password_hash = $${params.length}`;
+  if (password !== undefined && password !== null) {
+    const trimmed = String(password).trim();
+    if (trimmed.length > 0) {
+      if (trimmed.length < 6) {
+        throw new Error('รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษร');
+      }
+      const newHash = await bcrypt.hash(trimmed, SALT_ROUNDS);
+      params.push(newHash);
+      passwordHashClause = `, password_hash = $${params.length}`;
+    }
   }
 
   const res = await db.query(
@@ -403,6 +414,40 @@ async function getLineRecipientsForAlert(stationId, alertType = 'water_level') {
  */
 async function getLineUserIdsForStation(stationId) {
   return getLineRecipientsForAlert(stationId, 'water_level');
+}
+
+/**
+ * Get all active LINE recipients for daily status summary (citizens, staff, admin)
+ * Deduplicated array of line_user_ids
+ */
+async function getAllLineRecipientsForSummary() {
+  try {
+    const usersRes = await db.query(
+      `SELECT line_user_id
+       FROM users
+       WHERE line_user_id IS NOT NULL
+         AND line_user_id != ''
+         AND is_active = true`
+    );
+
+    const subsRes = await db.query(
+      `SELECT line_user_id
+       FROM line_subscribers
+       WHERE line_user_id IS NOT NULL
+         AND line_user_id != ''
+         AND is_active = true`
+    );
+
+    const allIds = [
+      ...usersRes.rows.map((r) => r.line_user_id),
+      ...subsRes.rows.map((r) => r.line_user_id),
+    ].filter(Boolean);
+
+    return [...new Set(allIds)];
+  } catch (err) {
+    console.error('[UserService] Error getting all LINE recipients for summary:', err.message);
+    return [];
+  }
 }
 
 
@@ -614,6 +659,40 @@ async function setupCitizenCredentials({ userId, lineUserId, email, password }) 
   return formatUser(updateRes.rows[0]);
 }
 
+/**
+ * Change password for authenticated user (verifies current password)
+ */
+async function changePassword(userId, currentPassword, newPassword) {
+  if (!currentPassword || !currentPassword.trim()) {
+    throw new Error('กรุณากรอกรหัสผ่านปัจจุบัน');
+  }
+  if (!newPassword || newPassword.trim().length < 6) {
+    throw new Error('รหัสผ่านใหม่ต้องมีความยาวอย่างน้อย 6 ตัวอักษร');
+  }
+
+  const res = await db.query(
+    `SELECT user_id, password_hash FROM users WHERE user_id = $1 LIMIT 1`,
+    [userId]
+  );
+  if (res.rows.length === 0) {
+    throw new Error('ไม่พบข้อมูลผู้ใช้ในระบบ');
+  }
+
+  const user = res.rows[0];
+  const isMatch = await bcrypt.compare(currentPassword.trim(), user.password_hash);
+  if (!isMatch) {
+    throw new Error('รหัสผ่านปัจจุบันไม่ถูกต้อง');
+  }
+
+  const newHash = await bcrypt.hash(newPassword.trim(), SALT_ROUNDS);
+  await db.query(
+    `UPDATE users SET password_hash = $1, is_credentials_set = TRUE, updated_at = NOW() WHERE user_id = $2`,
+    [newHash, userId]
+  );
+
+  return { success: true, message: 'เปลี่ยนรหัสผ่านสำเร็จเรียบร้อยแล้ว' };
+}
+
 module.exports = {
   loginUser,
   getAllUsers,
@@ -621,10 +700,12 @@ module.exports = {
   createUser,
   updateUser,
   deleteUser,
+  changePassword,
   saveOrUpdateSubscriber,
   deactivateSubscriber,
   getLineRecipientsForAlert,
   getLineUserIdsForStation,
+  getAllLineRecipientsForSummary,
   getCitizenByLineId,
   registerCitizen,
   registerCitizenEmail,
