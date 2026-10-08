@@ -105,6 +105,29 @@ router.post('/setup-credentials', async (req, res) => {
   }
 });
 
+// ── POST /api/users/link-line ────────────────────────────────────
+router.post('/link-line', async (req, res) => {
+  try {
+    const { userId, lineUserId, displayName, pictureUrl } = req.body;
+    if (!userId) {
+      return res.status(400).json({ success: false, error: 'ไม่พบรหัสผู้ใช้ (userId)' });
+    }
+    if (!lineUserId || !lineUserId.trim()) {
+      return res.status(400).json({ success: false, error: 'ไม่พบรหัสผู้ใช้ LINE (lineUserId)' });
+    }
+
+    const updatedUser = await userService.linkLineToUser(userId, lineUserId, displayName, pictureUrl);
+    res.json({
+      success: true,
+      data: updatedUser,
+      message: 'เชื่อมต่อบัญชี LINE สำเร็จเรียบร้อยแล้ว',
+    });
+  } catch (err) {
+    console.error('[API /users/link-line] Error:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
 // ── GET /api/users/citizen-status/:lineUserId ────────────────────
 router.get('/citizen-status/:lineUserId', async (req, res) => {
   try {

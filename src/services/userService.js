@@ -693,6 +693,67 @@ async function changePassword(userId, currentPassword, newPassword) {
   return { success: true, message: 'เปลี่ยนรหัสผ่านสำเร็จเรียบร้อยแล้ว' };
 }
 
+/**
+ * Link LINE account to an existing user
+ */
+async function linkLineToUser(userId, lineUserId, displayName = null, pictureUrl = null) {
+  if (!userId) {
+    throw new Error('ไม่พบรหัสผู้ใช้');
+  }
+  if (!lineUserId || !lineUserId.trim()) {
+    throw new Error('ไม่พบรหัสผู้ใช้ LINE (lineUserId)');
+  }
+
+  const cleanLineId = lineUserId.trim();
+
+  // 1. Check if lineUserId is already linked to another active account
+  const checkConflict = await db.query(
+    `SELECT user_id, name, email FROM users WHERE line_user_id = $1 AND user_id != $2 LIMIT 1`,
+    [cleanLineId, userId]
+  );
+  if (checkConflict.rows.length > 0) {
+    const conflictUser = checkConflict.rows[0];
+    throw new Error(`บัญชี LINE นี้ถูกเชื่อมต่อกับผู้ใช้อื่นแล้ว (${conflictUser.name || conflictUser.email})`);
+  }
+
+  // 2. Fetch current user
+  const userRes = await db.query(`SELECT * FROM users WHERE user_id = $1 LIMIT 1`, [userId]);
+  if (userRes.rows.length === 0) {
+    throw new Error('ไม่พบข้อมูลผู้ใช้ในระบบ');
+  }
+  const currentUser = userRes.rows[0];
+
+  // 3. Update user with line_user_id
+  const updateRes = await db.query(
+    `UPDATE users
+     SET line_user_id = $1,
+         updated_at = NOW()
+     WHERE user_id = $2
+     RETURNING user_id, name, email, phone, role, district, line_user_id, station_ids, is_active, is_credentials_set, created_at, updated_at`,
+    [cleanLineId, userId]
+  );
+
+  // 4. Ensure line_subscribers has this user with their station subscriptions
+  try {
+    const finalStations = currentUser.station_ids || [];
+    await db.query(
+      `INSERT INTO line_subscribers (
+        line_user_id, display_name, station_ids, is_active, created_at, updated_at
+      ) VALUES ($1, $2, $3, true, NOW(), NOW())
+      ON CONFLICT (line_user_id) DO UPDATE SET
+        display_name = COALESCE(EXCLUDED.display_name, line_subscribers.display_name),
+        station_ids = EXCLUDED.station_ids,
+        is_active = true,
+        updated_at = NOW()`,
+      [cleanLineId, displayName || currentUser.name || 'ประชาชนผู้ใช้งาน', finalStations]
+    );
+  } catch (subErr) {
+    console.warn('[userService.linkLineToUser] Subscriber upsert warning:', subErr.message);
+  }
+
+  return formatUser(updateRes.rows[0]);
+}
+
 module.exports = {
   loginUser,
   getAllUsers,
@@ -710,5 +771,6 @@ module.exports = {
   registerCitizen,
   registerCitizenEmail,
   setupCitizenCredentials,
+  linkLineToUser,
 };
 
