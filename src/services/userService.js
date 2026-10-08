@@ -491,9 +491,9 @@ async function registerCitizen({ lineUserId, name, phone = '', district = '', st
     const uRes = await db.query(
       `UPDATE users
        SET name = COALESCE(NULLIF($1, ''), name),
-           phone = $2,
-           district = $3,
-           station_ids = $4,
+           phone = COALESCE(NULLIF($2, ''), phone),
+           district = COALESCE(NULLIF($3, ''), district),
+           station_ids = CASE WHEN role = 'staff' AND array_length(station_ids, 1) > 0 THEN station_ids ELSE $4 END,
            is_active = true,
            updated_at = NOW()
        WHERE line_user_id = $5
