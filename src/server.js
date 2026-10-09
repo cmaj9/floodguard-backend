@@ -1,5 +1,5 @@
 process.env.TZ = 'Asia/Bangkok';
-require('dotenv').config();
+require('dotenv').config(); // Reload environment variables
 const app = require('./app');
 const { testConnection } = require('./config/database');
 const { connectMqtt, disconnectMqtt } = require('./config/mqtt');

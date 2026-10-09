@@ -158,6 +158,10 @@ async function sendLineAlert(lineUserIds, messagePayload) {
 
       if (!response.ok) {
         const errorBody = await response.text();
+        if (response.status === 429 || errorBody.includes('monthly limit')) {
+          console.error('[LINE Service] โควตาส่งข้อความของ LINE OA ประจำเดือนนี้เต็มแล้ว (HTTP 429: You have reached your monthly limit)! ระบบไม่สามารถส่งการแจ้งเตือนแบบ Push/Multicast ได้จนกว่าจะอัปเกรดแพ็กเกจบน LINE Official Account Manager หรือรอรีเซ็ตในวันแรกของเดือนถัดไป');
+          return { success: false, error: 'MONTHLY_LIMIT_EXCEEDED', details: errorBody };
+        }
         console.error(`[LINE Service] Multicast error (${response.status}):`, errorBody);
         return { success: false, error: errorBody };
       }
@@ -168,6 +172,47 @@ async function sendLineAlert(lineUserIds, messagePayload) {
   } catch (err) {
     console.error('[LINE Service] Failed to send LINE message:', err.message);
     return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Check LINE Messaging API Monthly Quota and Consumption
+ */
+async function getLineQuotaInfo() {
+  const token = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
+  if (!token) {
+    return { configured: false, reason: 'LINE_CHANNEL_ACCESS_TOKEN is not configured' };
+  }
+
+  try {
+    const [quotaRes, consRes] = await Promise.all([
+      fetch('https://api.line.me/v2/bot/message/quota', {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+      fetch('https://api.line.me/v2/bot/message/quota/consumption', {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+    ]);
+
+    const quotaData = await quotaRes.json();
+    const consData = await consRes.json();
+
+    const total = typeof quotaData.value === 'number' ? quotaData.value : 0;
+    const used = typeof consData.totalUsage === 'number' ? consData.totalUsage : 0;
+    const isLimited = quotaData.type === 'limited';
+    const isExceeded = isLimited && used >= total;
+
+    return {
+      configured: true,
+      type: quotaData.type || 'limited',
+      total,
+      used,
+      remaining: isLimited ? Math.max(0, total - used) : null,
+      isExceeded,
+    };
+  } catch (err) {
+    console.error('[LINE Service] getLineQuotaInfo error:', err.message);
+    return { configured: true, error: err.message };
   }
 }
 
@@ -1274,6 +1319,7 @@ module.exports = {
   getUserProfile,
   replyMessage,
   sendLineAlert,
+  getLineQuotaInfo,
   formatAlertMessage,
   createAlertFlexMessage,
   createStatusSummaryFlexMessage,

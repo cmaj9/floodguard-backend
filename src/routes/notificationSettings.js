@@ -3,6 +3,19 @@ const router = express.Router();
 const db = require('../config/database');
 const { getSettings, saveSettings, resetStationSettings } = require('../services/notificationSettingService');
 const { saveOrUpdateSubscriber } = require('../services/userService');
+const { getLineQuotaInfo } = require('../services/lineService');
+
+// ── GET /api/notifications/line-quota ─────────────────────────────
+// Get LINE Messaging API monthly quota and current usage status
+router.get('/line-quota', async (req, res) => {
+  try {
+    const quotaInfo = await getLineQuotaInfo();
+    res.json({ success: true, data: quotaInfo });
+  } catch (err) {
+    console.error('[API /notifications/line-quota] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Failed to fetch LINE quota info' });
+  }
+});
 
 // ── GET /api/notifications/settings ───────────────────────────────
 // Get global notification settings
