@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const alertService = require('../services/alertService');
+const { authenticateToken, requireRole } = require('../middleware/auth');
 
 // ── GET /api/alerts ───────────────────────────────────────────────
 router.get('/', async (req, res) => {
@@ -19,7 +20,8 @@ router.get('/', async (req, res) => {
 });
 
 // ── PATCH /api/alerts/:alertId/acknowledge ────────────────────────
-router.patch('/:alertId/acknowledge', async (req, res) => {
+// Staff and Admin only
+router.patch('/:alertId/acknowledge', authenticateToken, requireRole(['admin', 'staff']), async (req, res) => {
   try {
     const updated = await alertService.acknowledgeAlert(req.params.alertId);
     res.json({ success: true, data: updated, message: 'รับทราบการแจ้งเตือนแล้ว' });
@@ -30,7 +32,8 @@ router.patch('/:alertId/acknowledge', async (req, res) => {
 });
 
 // ── POST /api/alerts/broadcast-summary ─────────────────────────────
-router.post('/broadcast-summary', async (req, res) => {
+// Staff and Admin only
+router.post('/broadcast-summary', authenticateToken, requireRole(['admin', 'staff']), async (req, res) => {
   try {
     const { sendDailyWaterSummary } = require('../services/schedulerService');
     const period = req.body?.period || 'manual';

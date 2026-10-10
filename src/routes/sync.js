@@ -2,11 +2,18 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
 
-const SYNC_SECRET = process.env.SYNC_SECRET || 'waterwatch_sync_secret_2026';
+const SYNC_SECRET = process.env.SYNC_SECRET;
 
 router.post('/sync-backup', async (req, res) => {
+  if (!SYNC_SECRET) {
+    return res.status(503).json({
+      success: false,
+      error: 'Database synchronization is disabled (SYNC_SECRET is not configured on the server)',
+    });
+  }
+
   const authHeader = req.headers['x-sync-secret'];
-  if (authHeader !== SYNC_SECRET) {
+  if (!authHeader || authHeader !== SYNC_SECRET) {
     return res.status(403).json({ success: false, error: 'Unauthorized' });
   }
 

@@ -4,10 +4,11 @@ const db = require('../config/database');
 const { getSettings, saveSettings, resetStationSettings } = require('../services/notificationSettingService');
 const { saveOrUpdateSubscriber } = require('../services/userService');
 const { getLineQuotaInfo } = require('../services/lineService');
+const { authenticateToken, requireRole } = require('../middleware/auth');
 
 // ── GET /api/notifications/line-quota ─────────────────────────────
-// Get LINE Messaging API monthly quota and current usage status
-router.get('/line-quota', async (req, res) => {
+// Get LINE Messaging API monthly quota and current usage status (Admin & Staff)
+router.get('/line-quota', authenticateToken, requireRole(['admin', 'staff']), async (req, res) => {
   try {
     const quotaInfo = await getLineQuotaInfo();
     res.json({ success: true, data: quotaInfo });
@@ -30,8 +31,8 @@ router.get('/settings', async (req, res) => {
 });
 
 // ── PUT /api/notifications/settings ───────────────────────────────
-// Update global notification settings (Admin/Officer)
-router.put('/settings', async (req, res) => {
+// Update global notification settings (Admin only)
+router.put('/settings', authenticateToken, requireRole(['admin']), async (req, res) => {
   try {
     const updated = await saveSettings(req.body, null);
     res.json({ success: true, data: updated, message: 'บันทึกการตั้งค่าการแจ้งเตือนส่วนกลางสำเร็จ' });
@@ -55,8 +56,8 @@ router.get('/settings/:stationId', async (req, res) => {
 });
 
 // ── PUT /api/notifications/settings/:stationId ────────────────────
-// Update notification settings for a specific station
-router.put('/settings/:stationId', async (req, res) => {
+// Update notification settings for a specific station (Admin & Staff)
+router.put('/settings/:stationId', authenticateToken, requireRole(['admin', 'staff']), async (req, res) => {
   const { stationId } = req.params;
   try {
     const updated = await saveSettings(req.body, stationId);
@@ -68,8 +69,8 @@ router.put('/settings/:stationId', async (req, res) => {
 });
 
 // ── DELETE /api/notifications/settings/:stationId ─────────────────
-// Reset station settings back to global defaults
-router.delete('/settings/:stationId', async (req, res) => {
+// Reset station settings back to global defaults (Admin & Staff)
+router.delete('/settings/:stationId', authenticateToken, requireRole(['admin', 'staff']), async (req, res) => {
   const { stationId } = req.params;
   try {
     const globalSettings = await resetStationSettings(stationId);

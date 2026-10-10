@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
 const { recalculateStationReadings } = require('../services/readingService');
+const { authenticateToken, requireRole } = require('../middleware/auth');
 
 // ── GET /api/stations ─────────────────────────────────────────────
 // Returns all stations with their latest reading joined
@@ -226,8 +227,8 @@ router.get('/:stationId', async (req, res) => {
 });
 
 // ── PATCH /api/stations/:stationId/status ─────────────────────────
-// Quick toggle station status ('active' / 'offline' / 'maintenance')
-router.patch('/:stationId/status', async (req, res) => {
+// Quick toggle station status ('active' / 'offline' / 'maintenance') - Staff & Admin
+router.patch('/:stationId/status', authenticateToken, requireRole(['admin', 'staff']), async (req, res) => {
   const { stationId } = req.params;
   const { status } = req.body;
 
@@ -265,8 +266,8 @@ router.patch('/:stationId/status', async (req, res) => {
 });
 
 // ── PUT /api/stations/:stationId/calibration ──────────────────────
-// Update calibration and reference point parameters for a station
-router.put('/:stationId/calibration', async (req, res) => {
+// Update calibration and reference point parameters for a station - Staff & Admin
+router.put('/:stationId/calibration', authenticateToken, requireRole(['admin', 'staff']), async (req, res) => {
   const { stationId } = req.params;
   const {
     sensor_to_ref_distance,
@@ -341,8 +342,8 @@ router.put('/:stationId/calibration', async (req, res) => {
 });
 
 // ── PUT /api/stations/:stationId ──────────────────────────────────
-// Update full station data including metadata and calibration
-router.put('/:stationId', async (req, res) => {
+// Update full station data including metadata and calibration - Staff & Admin
+router.put('/:stationId', authenticateToken, requireRole(['admin', 'staff']), async (req, res) => {
   const { stationId } = req.params;
   const {
     station_name,
@@ -436,8 +437,8 @@ router.put('/:stationId', async (req, res) => {
 });
 
 // ── POST /api/stations ─────────────────────────────────────────────
-// Create new station with duplicate check and gateway validation
-router.post('/', async (req, res) => {
+// Create new station with duplicate check and gateway validation - Staff & Admin
+router.post('/', authenticateToken, requireRole(['admin', 'staff']), async (req, res) => {
   const {
     station_id,
     gateway_id,
@@ -547,8 +548,8 @@ router.post('/', async (req, res) => {
 });
 
 // ── DELETE /api/stations/:stationId ───────────────────────────────
-// Permanently delete station and cascade clean related tables
-router.delete('/:stationId', async (req, res) => {
+// Permanently delete station and cascade clean related tables - Admin only
+router.delete('/:stationId', authenticateToken, requireRole(['admin']), async (req, res) => {
   const { stationId } = req.params;
 
   try {
