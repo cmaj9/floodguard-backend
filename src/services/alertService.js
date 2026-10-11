@@ -1,5 +1,10 @@
 const db = require('../config/database');
-const { sendLineAlert, formatAlertMessage, createAlertFlexMessage } = require('./lineService');
+const {
+  sendLineAlert,
+  formatAlertMessage,
+  createAlertFlexMessage,
+  createGatewayOfflineFlexMessage,
+} = require('./lineService');
 const { getLineUserIdsForStation, getLineRecipientsForAlert } = require('./userService');
 const { getSettings } = require('./notificationSettingService');
 
@@ -538,8 +543,13 @@ async function checkGatewayHeartbeats() {
           // Notify admins/staff via LINE OA
           const lineUserIds = await getLineRecipientsForAlert(null, 'offline');
           if (lineUserIds && lineUserIds.length > 0) {
-            const message = `⚠️ แจ้งเตือนเกตเวย์ออฟไลน์\nเกตเวย์: ${gw.gateway_name || gw.gateway_id}\nขาดการเชื่อมต่อ: ${minutesSinceUpdate} นาที\nสถานีที่ได้รับผลกระทบ: ${affectedStations}\nกรุณาตรวจสอบระบบโครงข่ายหรือแหล่งจ่ายไฟ`;
-            await sendLineAlert(lineUserIds, message).catch(err => console.error('[AlertService] Failed to send GW alert:', err.message));
+            const flexMsg = createGatewayOfflineFlexMessage({
+              gatewayName: gw.gateway_name,
+              gatewayId: gw.gateway_id,
+              minutesSinceUpdate,
+              affectedStations,
+            });
+            await sendLineAlert(lineUserIds, flexMsg).catch(err => console.error('[AlertService] Failed to send GW alert:', err.message));
           }
         }
       }

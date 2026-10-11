@@ -326,9 +326,9 @@ function getStationImageUrl(stationId) {
     }
     const webUrl = getWebUrl();
     if (webUrl.startsWith('https://')) {
-      return `${webUrl}/master_node.jpeg`;
+      return `${webUrl}/masternodev2.jpg`;
     }
-    return 'https://waterwatch-frontend-mu.vercel.app/master_node.jpeg';
+    return 'https://waterwatch-frontend-mu.vercel.app/masternodev2.jpg';
   }
   return null;
 }
@@ -439,6 +439,7 @@ function createAlertFlexMessage({
 }) {
   const deepLinkUrl = getLiffUrl(`/nodes/${encodeURIComponent(stationId)}`);
   const googleMapsUrl = getGoogleMapsUrl(station);
+  const stationImage = getStationImageUrl(stationId);
 
   const now = new Date();
   const timeStr =
@@ -675,6 +676,17 @@ function createAlertFlexMessage({
   const bubble = {
     type: 'bubble',
     size: 'mega',
+    ...(stationImage
+      ? {
+          hero: {
+            type: 'image',
+            url: stationImage,
+            size: 'full',
+            aspectRatio: '16:9',
+            aspectMode: 'cover',
+          },
+        }
+      : {}),
     body: {
       type: 'box',
       layout: 'vertical',
@@ -847,6 +859,226 @@ function createAlertFlexMessage({
   return {
     type: 'flex',
     altText: `[FloodGuard] ${categoryTitle} (${badgeText}): ${stationTitle} ${metricNumber}${metricUnit || ''}`,
+    contents: bubble,
+  };
+}
+
+/**
+ * Create a Bento Grid Flex Message for Gateway Offline alerts (Zero Unicode Emojis, Clean Whitespace Rhythm)
+ */
+function createGatewayOfflineFlexMessage({
+  gatewayName,
+  gatewayId,
+  minutesSinceUpdate,
+  affectedStations = 'ไม่มี',
+}) {
+  const deepLinkDashboard = getLiffUrl('/dashboard');
+  const deepLinkManagement = getLiffUrl('/management');
+
+  const now = new Date();
+  const timeStr =
+    now.toLocaleDateString('th-TH', {
+      timeZone: 'Asia/Bangkok',
+      day: '2-digit',
+      month: 'short',
+    }) +
+    ' ' +
+    now.toLocaleTimeString('th-TH', {
+      timeZone: 'Asia/Bangkok',
+      hour: '2-digit',
+      minute: '2-digit',
+    }) +
+    ' น.';
+
+  const themeColor = '#DC2626'; // Crimson red for gateway offline critical alert
+  const title = gatewayName ? `${gatewayName} (${gatewayId})` : (gatewayId || 'เกตเวย์ LoRaWAN');
+
+  const bubble = {
+    type: 'bubble',
+    size: 'mega',
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      paddingAll: 'xl',
+      backgroundColor: '#FFFFFF',
+      contents: [
+        // 1. Header Row
+        {
+          type: 'box',
+          layout: 'horizontal',
+          alignItems: 'center',
+          contents: [
+            {
+              type: 'text',
+              text: 'แจ้งเตือนระบบเกตเวย์',
+              size: 'sm',
+              weight: 'bold',
+              color: themeColor,
+            },
+            {
+              type: 'box',
+              layout: 'vertical',
+              backgroundColor: themeColor,
+              cornerRadius: '9999px',
+              paddingTop: '3px',
+              paddingBottom: '3px',
+              paddingStart: '10px',
+              paddingEnd: '10px',
+              flex: 0,
+              contents: [
+                {
+                  type: 'text',
+                  text: 'เกตเวย์ออฟไลน์',
+                  color: '#FFFFFF',
+                  size: 'xs',
+                  weight: 'bold',
+                  gravity: 'center',
+                },
+              ],
+            },
+          ],
+        },
+        // 2. Gateway Identification Block (Clean Whitespace: margin xl)
+        {
+          type: 'box',
+          layout: 'vertical',
+          alignItems: 'center',
+          margin: 'xl',
+          contents: [
+            {
+              type: 'text',
+              align: 'center',
+              wrap: true,
+              contents: [
+                {
+                  type: 'span',
+                  text: `${gatewayName || 'เกตเวย์'} `,
+                  weight: 'bold',
+                  size: 'md',
+                  color: '#1E293B',
+                },
+                ...(gatewayId
+                  ? [
+                      {
+                        type: 'span',
+                        text: `(${gatewayId})`,
+                        size: 'xs',
+                        color: '#64748B',
+                        weight: 'regular',
+                      },
+                    ]
+                  : []),
+              ],
+            },
+            {
+              type: 'text',
+              text: 'เครือข่ายสัญญาณ LoRaWAN Gateway',
+              size: 'xs',
+              color: '#64748B',
+              align: 'center',
+              margin: 'xs',
+            },
+          ],
+        },
+        // 3. Hero Metric Block (Clean Whitespace: margin xxl)
+        {
+          type: 'box',
+          layout: 'baseline',
+          justifyContent: 'center',
+          spacing: 'xs',
+          margin: 'xxl',
+          contents: [
+            {
+              type: 'text',
+              text: `${minutesSinceUpdate ?? '-'}`,
+              size: '5xl',
+              weight: 'bold',
+              color: themeColor,
+              flex: 0,
+            },
+            {
+              type: 'text',
+              text: 'นาที',
+              size: 'md',
+              weight: 'bold',
+              color: '#64748B',
+              flex: 0,
+            },
+          ],
+        },
+        // 4. Alert Message & Affected Stations Block (Clean Whitespace: margin md)
+        {
+          type: 'box',
+          layout: 'vertical',
+          alignItems: 'center',
+          margin: 'md',
+          contents: [
+            {
+              type: 'text',
+              text: 'ขาดการเชื่อมต่อกับแม่ข่ายระบบ',
+              color: themeColor,
+              weight: 'bold',
+              size: 'sm',
+              align: 'center',
+            },
+            {
+              type: 'text',
+              text: `สถานีที่ได้รับผลกระทบ: ${affectedStations}\nโปรดตรวจสอบระบบโครงข่ายหรือแหล่งจ่ายไฟ`,
+              color: '#64748B',
+              size: 'xs',
+              align: 'center',
+              wrap: true,
+              margin: 'xs',
+            },
+          ],
+        },
+        // 5. Action Buttons Block (Clean Whitespace: margin xxl)
+        {
+          type: 'box',
+          layout: 'vertical',
+          spacing: 'sm',
+          margin: 'xxl',
+          contents: [
+            {
+              type: 'button',
+              style: 'secondary',
+              height: 'sm',
+              color: '#F1F5F9',
+              action: {
+                type: 'uri',
+                label: 'ตรวจสอบสถานี',
+                uri: deepLinkDashboard,
+              },
+            },
+            {
+              type: 'button',
+              style: 'secondary',
+              height: 'sm',
+              color: '#F1F5F9',
+              action: {
+                type: 'uri',
+                label: 'ศูนย์จัดการระบบ',
+                uri: deepLinkManagement,
+              },
+            },
+          ],
+        },
+        // 6. Footer Timestamp (Clean Whitespace: margin lg)
+        {
+          type: 'text',
+          text: `${timeStr} • ฝ่ายบำรุงรักษา`,
+          size: 'xxs',
+          color: '#94A3B8',
+          align: 'center',
+          margin: 'lg',
+        },
+      ],
+    },
+  };
+
+  return {
+    type: 'flex',
+    altText: `[FloodGuard] แจ้งเตือนเกตเวย์ออฟไลน์: ${title} ขาดการเชื่อมต่อ ${minutesSinceUpdate} นาที`,
     contents: bubble,
   };
 }
@@ -1322,10 +1554,12 @@ module.exports = {
   getLineQuotaInfo,
   formatAlertMessage,
   createAlertFlexMessage,
+  createGatewayOfflineFlexMessage,
   createStatusSummaryFlexMessage,
   createWelcomeFlexMessage,
   getWebUrl,
   getLiffUrl,
+  getStationImageUrl,
   BENTO_THEME,
   THEME: BENTO_THEME,
 };
