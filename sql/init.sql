@@ -1,5 +1,10 @@
--- Water Level Monitoring System - Database Initialization
+-- ============================================================
+-- Water Level Monitoring System (FloodGuard) - Unified Database Schema
 -- Run: psql -U postgres -d water_monitor -f sql/init.sql
+-- ============================================================
+
+-- Extensions
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- ============================================================
 -- ENUMS
@@ -13,11 +18,21 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
-  CREATE TYPE "StationStatus" AS ENUM ('active', 'inactive', 'maintenance');
+  CREATE TYPE "StationStatus" AS ENUM ('active', 'inactive', 'maintenance', 'offline');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
-  CREATE TYPE "AlertType" AS ENUM ('water_level', 'battery', 'offline', 'tilt');
+  CREATE TYPE "AlertType" AS ENUM (
+    'water_level',
+    'rate_of_rise',
+    'battery',
+    'battery_low',
+    'offline',
+    'online',
+    'tilt',
+    'geofence',
+    'sensor_drift'
+  );
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
@@ -25,63 +40,110 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ============================================================
--- TABLE: gateway
+-- 1. TABLE: gateway
 -- ============================================================
 CREATE TABLE IF NOT EXISTS gateway (
-  gateway_id   VARCHAR(20) PRIMARY KEY,
-  gateway_name VARCHAR(100),
-  ip_address   VARCHAR(50),
-  last_update  TIMESTAMP,
-  status       "GatewayStatus" DEFAULT 'offline'
+  gateway_id      VARCHAR(20) PRIMARY KEY,
+  gateway_name    VARCHAR(100),
+  ip_address      VARCHAR(50),
+  chirpstack_id   VARCHAR(64),
+  chirpstack_ids  TEXT[] DEFAULT '{}',
+  last_update     TIMESTAMP WITH TIME ZONE,
+  status          "GatewayStatus" DEFAULT 'offline',
+  created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 -- ============================================================
--- TABLE: station
+-- 2. TABLE: station
 -- ============================================================
 CREATE TABLE IF NOT EXISTS station (
-  station_id    VARCHAR(20) PRIMARY KEY,
-  gateway_id    VARCHAR(20) NOT NULL REFERENCES gateway(gateway_id) ON DELETE RESTRICT,
-  station_name  VARCHAR(100),
-  station_type  "StationType" DEFAULT 'river',
-  location_name VARCHAR(150),
-  latitude      DECIMAL(10, 6),
-  longitude     DECIMAL(10, 6),
-  install_date  DATE,
-  status        "StationStatus" DEFAULT 'active',
-  -- reference and calibration fields
-  sensor_to_ref_distance FLOAT DEFAULT 2.0,
-  reference_point_name   VARCHAR(100) DEFAULT 'จุดอ้างอิง',
-  blind_zone_offset      FLOAT DEFAULT 0.28,
-  tilt_compensation_enabled BOOLEAN DEFAULT true,
-  -- threshold fields for alert logic (optional / relative to reference point)
-  warning_level   FLOAT,
-  critical_level  FLOAT,
-  max_level       FLOAT,
-  normal_max      FLOAT
+  station_id                 VARCHAR(20) PRIMARY KEY,
+  gateway_id                 VARCHAR(20) NOT NULL REFERENCES gateway(gateway_id) ON DELETE RESTRICT,
+  station_name               VARCHAR(100) NOT NULL,
+  station_type               "StationType" DEFAULT 'river',
+  location_name              VARCHAR(150),
+  latitude                   DECIMAL(10, 6),
+  longitude                  DECIMAL(10, 6),
+  install_date               DATE,
+  status                     "StationStatus" DEFAULT 'active',
+  status_updated_at          TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  manual_offline_at          TIMESTAMP WITH TIME ZONE,
+  -- Hardware & Sensor Telemetry Mapping
+  dev_eui                    VARCHAR(64),
+  dev_euis                   TEXT[] DEFAULT '{}',
+  payload_id                 VARCHAR(32),
+  model                      VARCHAR(64),
+  firmware_version           VARCHAR(32),
+  -- Calibration & Reference Configuration
+  sensor_to_ref_distance     FLOAT DEFAULT 2.0,
+  reference_point_name       VARCHAR(100) DEFAULT 'จุดอ้างอิง',
+  blind_zone_offset          FLOAT DEFAULT 0.28,
+  tilt_compensation_enabled  BOOLEAN DEFAULT true,
+  tilt_offset_x              FLOAT DEFAULT 0.0,
+  tilt_offset_y              FLOAT DEFAULT 0.0,
+  -- Thresholds (relative to reference point)
+  warning_level              FLOAT,
+  critical_level             FLOAT,
+  max_level                  FLOAT,
+  normal_max                 FLOAT
+);
+
+CREATE INDEX IF NOT EXISTS idx_station_gateway ON station(gateway_id);
+CREATE INDEX IF NOT EXISTS idx_station_dev_eui ON station(dev_eui);
+CREATE INDEX IF NOT EXISTS idx_station_payload_id ON station(payload_id);
+
+-- ============================================================
+-- 3. TABLE: users
+-- ============================================================
+CREATE TABLE IF NOT EXISTS users (
+  user_id            SERIAL PRIMARY KEY,
+  name               VARCHAR(100) NOT NULL,
+  email              VARCHAR(150) UNIQUE NOT NULL,
+  password_hash      VARCHAR(255) NOT NULL,
+  phone              VARCHAR(20) DEFAULT '',
+  role               VARCHAR(20) NOT NULL DEFAULT 'citizen',
+  district           VARCHAR(100) DEFAULT '',
+  line_user_id       VARCHAR(64) UNIQUE,
+  station_ids        TEXT[] DEFAULT '{}',
+  picture_url        TEXT,
+  is_active          BOOLEAN DEFAULT true,
+  is_credentials_set BOOLEAN DEFAULT true,
+  created_at         TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at         TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_line_user_id ON users(line_user_id) WHERE line_user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+
+-- ============================================================
+-- 4. TABLE: notification_settings
+-- ============================================================
+CREATE TABLE IF NOT EXISTS notification_settings (
+  setting_id               SERIAL PRIMARY KEY,
+  station_id               VARCHAR(50) UNIQUE REFERENCES station(station_id) ON DELETE CASCADE,
+  water_level_enabled      BOOLEAN DEFAULT true,
+  safety_offset            FLOAT DEFAULT 0.0,
+  rate_of_rise_enabled     BOOLEAN DEFAULT true,
+  rate_of_rise_threshold   FLOAT DEFAULT 0.30,
+  offline_timeout_enabled  BOOLEAN DEFAULT true,
+  offline_timeout_minutes  INTEGER DEFAULT 30,
+  battery_low_enabled      BOOLEAN DEFAULT true,
+  battery_low_threshold    FLOAT DEFAULT 20.0,
+  geofence_enabled         BOOLEAN DEFAULT true,
+  geofence_radius_meters   FLOAT DEFAULT 100.0,
+  created_at               TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at               TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 -- ============================================================
--- TABLE: mcu
--- ============================================================
-CREATE TABLE IF NOT EXISTS mcu (
-  mcu_id           VARCHAR(20) PRIMARY KEY,
-  station_id       VARCHAR(20) NOT NULL REFERENCES station(station_id) ON DELETE CASCADE,
-  model            VARCHAR(100),
-  firmware_version VARCHAR(50),
-  signal_strength  FLOAT,
-  battery_level    FLOAT,
-  last_update      TIMESTAMP
-);
-
--- ============================================================
--- TABLE: readings
+-- 5. TABLE: readings
 -- ============================================================
 CREATE TABLE IF NOT EXISTS readings (
   reading_id      BIGSERIAL PRIMARY KEY,
   station_id      VARCHAR(20) NOT NULL REFERENCES station(station_id) ON DELETE CASCADE,
-  timestamp       TIMESTAMP NOT NULL DEFAULT NOW(),
-  raw_distance    FLOAT,
-  water_level     FLOAT,
+  timestamp       TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  raw_distance    NUMERIC(6, 3),
+  water_level     NUMERIC(6, 3),
   is_blind_zone   BOOLEAN DEFAULT false,
   temperature     FLOAT,
   humidity        FLOAT,
@@ -95,22 +157,18 @@ CREATE TABLE IF NOT EXISTS readings (
   longitude       DECIMAL(10, 6)
 );
 
--- Index for fast queries by station + time
 CREATE INDEX IF NOT EXISTS idx_readings_station_time ON readings (station_id, timestamp DESC);
 
 -- ============================================================
--- TABLE: alerts
+-- 6. TABLE: alerts
 -- ============================================================
-
--- Sequence สำหรับ auto-generate alert_id
 CREATE SEQUENCE IF NOT EXISTS alert_id_seq START 1;
 
--- Trigger function สร้าง alert_id แบบ 'AL-001'
 CREATE OR REPLACE FUNCTION generate_alert_id()
 RETURNS TRIGGER AS $$
 BEGIN
   IF NEW.alert_id IS NULL OR NEW.alert_id = '' THEN
-    NEW.alert_id := 'AL-' || LPAD(nextval('alert_id_seq')::TEXT, 3, '0');
+    NEW.alert_id := 'AL-' || LPAD(nextval('alert_id_seq')::TEXT, 6, '0');
   END IF;
   RETURN NEW;
 END;
@@ -119,7 +177,7 @@ $$ LANGUAGE plpgsql;
 CREATE TABLE IF NOT EXISTS alerts (
   alert_id   VARCHAR(20) PRIMARY KEY,
   station_id VARCHAR(20) NOT NULL REFERENCES station(station_id) ON DELETE CASCADE,
-  timestamp  TIMESTAMP NOT NULL DEFAULT NOW(),
+  timestamp  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
   alert_type "AlertType",
   value      FLOAT,
   threshold  FLOAT,
@@ -127,74 +185,45 @@ CREATE TABLE IF NOT EXISTS alerts (
   status     "AlertStatus" DEFAULT 'active'
 );
 
--- ติด trigger กับ table alerts
 DROP TRIGGER IF EXISTS trg_alert_id ON alerts;
 CREATE TRIGGER trg_alert_id
   BEFORE INSERT ON alerts
   FOR EACH ROW EXECUTE FUNCTION generate_alert_id();
 
--- ============================================================
--- TABLE: station_mapping
--- Maps payload station_id (number from sensor) → station_id (VARCHAR in DB)
--- ============================================================
-CREATE TABLE IF NOT EXISTS station_mapping (
-  payload_station_id  INTEGER PRIMARY KEY,
-  station_id          VARCHAR(20) NOT NULL REFERENCES station(station_id) ON DELETE CASCADE
-);
+CREATE INDEX IF NOT EXISTS idx_alerts_station_type_time ON alerts (station_id, alert_type, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts (status);
 
 -- ============================================================
--- TABLE: gateway_mapping
--- Maps ChirpStack gateway ID (hex) → gateway_id (VARCHAR in DB)
+-- DEFAULT SEED DATA
 -- ============================================================
-CREATE TABLE IF NOT EXISTS gateway_mapping (
-  chirpstack_gateway_id  VARCHAR(20) PRIMARY KEY,
-  gateway_id             VARCHAR(20) NOT NULL REFERENCES gateway(gateway_id) ON DELETE CASCADE
-);
+INSERT INTO gateway (gateway_id, gateway_name, ip_address, chirpstack_id, chirpstack_ids, status, last_update) VALUES
+  ('GW-001', 'Gateway_01', '192.168.1.100', '0016c001f1225893', ARRAY['0016c001f1225893', 'aa555a0000000000'], 'online', NOW())
+ON CONFLICT (gateway_id) DO UPDATE SET
+  chirpstack_id = COALESCE(gateway.chirpstack_id, EXCLUDED.chirpstack_id),
+  chirpstack_ids = CASE WHEN cardinality(gateway.chirpstack_ids) > 0 THEN gateway.chirpstack_ids ELSE EXCLUDED.chirpstack_ids END;
 
--- ============================================================
--- SEED DATA (ข้อมูลเริ่มต้นทดสอบระบบ)
--- ============================================================
-
--- 1. Gateway
-INSERT INTO gateway (gateway_id, gateway_name, ip_address, status) VALUES
-  ('GW-001', 'Gateway_01', '192.168.1.100', 'online')
-ON CONFLICT (gateway_id) DO NOTHING;
-
--- 2. Station
 INSERT INTO station (
   station_id, gateway_id, station_name, station_type,
   location_name, latitude, longitude, install_date, status,
+  dev_eui, dev_euis, payload_id, model, firmware_version,
   sensor_to_ref_distance, reference_point_name,
   warning_level, critical_level, max_level, normal_max
 ) VALUES
   ('ST-001', 'GW-001', 'มหาวิทยาลัยราชมงคลธัญบุรี', 'river',
    'อ.คลองหก จ.ปทุมธานี', 14.03593, 100.72516, '2024-01-15', 'active',
+   '65bcbb52145372b1', ARRAY['65bcbb52145372b1', 'a1b2c3d4e5f60001'], '1', 'Heltec-WiFi-LoRa-32(V3)', 'v1.2.0',
    2.0, 'ขอบตลิ่ง', -0.5, 0.0, 1.0, -1.0),
   ('ST-002', 'GW-001', 'สถานีคลองรังสิต', 'canal',
    'อ.ธัญบุรี จ.ปทุมธานี', 14.0208, 100.7594, '2024-02-10', 'active',
+   'a1b2c3d4e5f60002', ARRAY['a1b2c3d4e5f60002'], '2', 'Heltec-WiFi-LoRa-32(V3)', 'v1.2.0',
    2.5, 'ขอบตลิ่ง', -0.6, 0.0, 1.0, -1.2)
 ON CONFLICT (station_id) DO NOTHING;
 
--- 3. MCU
-INSERT INTO mcu (mcu_id, station_id, model, firmware_version, signal_strength, battery_level) VALUES
-  ('65bcbb52145372b1', 'ST-001', 'a01nyub-sensor',            'v1.2.0', -65.0, 100.0),
-  ('a1b2c3d4e5f60001', 'ST-001', 'Heltec-WiFi-LoRa-32(V3)',    'v1.2.0', -85.0, 94.5),
-  ('a1b2c3d4e5f60002', 'ST-002', 'Heltec-WiFi-LoRa-32(V3)',    'v1.2.0', -91.3, 78.0)
-ON CONFLICT (mcu_id) DO NOTHING;
-
--- 4. Station Mapping (payload station_id → DB station_id)
-INSERT INTO station_mapping (payload_station_id, station_id) VALUES
-  (1, 'ST-001'),
-  (2, 'ST-002')
-ON CONFLICT (payload_station_id) DO UPDATE SET station_id = EXCLUDED.station_id;
-
--- 5. Gateway Mapping (ChirpStack hex ID → DB gateway_id)
-INSERT INTO gateway_mapping (chirpstack_gateway_id, gateway_id) VALUES
-  ('0016c001f1225893', 'GW-001'),
-  ('aa555a0000000000', 'GW-001')
-ON CONFLICT (chirpstack_gateway_id) DO UPDATE SET gateway_id = EXCLUDED.gateway_id;
-
--- 6. Readings
--- ไม่ใส่ข้อมูล mock: ข้อมูลจริงจะถูกบันทึกผ่าน ChirpStack MQTT โดยอัตโนมัติ
-
-SELECT 'Database initialized successfully!' AS message;
+-- Global default notification settings (station_id = NULL)
+INSERT INTO notification_settings (
+  station_id, water_level_enabled, safety_offset, rate_of_rise_enabled,
+  rate_of_rise_threshold, offline_timeout_enabled, offline_timeout_minutes,
+  battery_low_enabled, battery_low_threshold, geofence_enabled, geofence_radius_meters
+) VALUES (
+  NULL, true, 0.0, true, 0.30, true, 30, true, 20.0, true, 100.0
+) ON CONFLICT DO NOTHING;

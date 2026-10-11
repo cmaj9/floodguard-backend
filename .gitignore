@@ -2,3 +2,5 @@ node_modules/
 .env
 *.log
 dist/
+test_db_optimization.js
+

@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { optionalAuthenticate } = require('../middleware/auth');
 const {
   processUplinkMessage,
   getLatestReadingsPerStation,
@@ -12,6 +13,20 @@ const {
 // ChirpStack HTTP Integration endpoint (allows ChirpStack to push uplinks directly to Cloud Backend)
 router.post(['/webhook', '/chirpstack'], async (req, res) => {
   try {
+    // Verify Webhook Secret if configured in .env
+    const expectedSecret = process.env.CHIRPSTACK_WEBHOOK_SECRET;
+    if (expectedSecret) {
+      const incomingSecret =
+        req.headers['x-chirpstack-secret'] ||
+        req.headers['x-webhook-secret'] ||
+        req.query.secret;
+
+      if (incomingSecret !== expectedSecret) {
+        console.warn('[API /readings/webhook] Unauthorized webhook attempt: secret mismatch');
+        return res.status(403).json({ success: false, error: 'Forbidden: Invalid webhook secret' });
+      }
+    }
+
     const event = req.query.event || req.headers['x-chirpstack-event'] || 'up';
     if (event !== 'up') {
       return res.status(200).json({ success: true, message: `Ignored non-up event: ${event}` });
@@ -28,9 +43,10 @@ router.post(['/webhook', '/chirpstack'], async (req, res) => {
 
 // ── GET /api/readings ─────────────────────────────────────────────
 // Returns latest reading for each active station (dashboard overview)
-router.get('/', async (req, res) => {
+router.get('/', optionalAuthenticate, async (req, res) => {
   try {
-    const readings = await getLatestReadingsPerStation();
+    const isStaffOrAdmin = Boolean(req.user && (req.user.role === 'admin' || req.user.role === 'staff'));
+    const readings = await getLatestReadingsPerStation(isStaffOrAdmin);
     res.json({ success: true, data: readings, count: readings.length });
   } catch (err) {
     console.error('[API /readings] Error:', err.message);
@@ -41,7 +57,8 @@ router.get('/', async (req, res) => {
 // ── GET /api/readings/history ─────────────────────────────────────
 // Returns all readings from all stations (newest first) for admin view
 // Query params: stationId, start (ISO), end (ISO), limit (default 50), offset (default 0)
-router.get('/history', async (req, res) => {
+router.get('/history', optionalAuthenticate, async (req, res) => {
+  const isStaffOrAdmin = Boolean(req.user && (req.user.role === 'admin' || req.user.role === 'staff'));
   const { stationId, start, end } = req.query;
   const limit  = Math.min(parseInt(req.query.limit  ?? '50'), 500);
   const offset = parseInt(req.query.offset ?? '0');
@@ -68,6 +85,11 @@ router.get('/history', async (req, res) => {
       conditions.push(`r.timestamp <= $${idx++}`);
       values.push(endTime);
     }
+  }
+
+  // Capped at manual_offline_at for non-staff if station is manually offline
+  if (!isStaffOrAdmin) {
+    conditions.push(`(s.manual_offline_at IS NULL OR r.timestamp <= s.manual_offline_at)`);
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -165,7 +187,8 @@ router.get('/history', async (req, res) => {
 // ── GET /api/readings/export/csv ──────────────────────────────────
 // Export readings to CSV format with all telemetry and sensor values
 // Query params: stationId, start (ISO), end (ISO), timeRange ('hourly'|'daily'|'weekly')
-router.get('/export/csv', async (req, res) => {
+router.get('/export/csv', optionalAuthenticate, async (req, res) => {
+  const isStaffOrAdmin = Boolean(req.user && (req.user.role === 'admin' || req.user.role === 'staff'));
   const { stationId, start, end, timeRange, range } = req.query;
   const selectedRange = timeRange || range;
 
@@ -175,6 +198,7 @@ router.get('/export/csv', async (req, res) => {
       startTime: start,
       endTime: end,
       timeRange: selectedRange,
+      isStaffOrAdmin,
     });
 
     const now = new Date();
@@ -195,13 +219,14 @@ router.get('/export/csv', async (req, res) => {
 // ── GET /api/readings/:stationId ──────────────────────────────────
 // Returns recent readings for a specific station (paginated)
 // Query params: limit (default 100), offset (default 0)
-router.get('/:stationId', async (req, res) => {
+router.get('/:stationId', optionalAuthenticate, async (req, res) => {
+  const isStaffOrAdmin = Boolean(req.user && (req.user.role === 'admin' || req.user.role === 'staff'));
   const { stationId } = req.params;
   const limit  = Math.min(parseInt(req.query.limit  ?? '100'), 1000);
   const offset = parseInt(req.query.offset ?? '0');
 
   try {
-    const readings = await getReadingsByStation(stationId, limit, offset);
+    const readings = await getReadingsByStation(stationId, limit, offset, isStaffOrAdmin);
     res.json({ success: true, data: readings, count: readings.length });
   } catch (err) {
     console.error(`[API /readings/${stationId}] Error:`, err.message);
@@ -212,7 +237,8 @@ router.get('/:stationId', async (req, res) => {
 // ── GET /api/readings/:stationId/range ────────────────────────────
 // Returns readings in a time range (for charts)
 // Query params: start (ISO), end (ISO)
-router.get('/:stationId/range', async (req, res) => {
+router.get('/:stationId/range', optionalAuthenticate, async (req, res) => {
+  const isStaffOrAdmin = Boolean(req.user && (req.user.role === 'admin' || req.user.role === 'staff'));
   const { stationId } = req.params;
   const { start, end } = req.query;
 
@@ -231,7 +257,7 @@ router.get('/:stationId/range', async (req, res) => {
   }
 
   try {
-    const readings = await getReadingsInRange(stationId, startTime, endTime);
+    const readings = await getReadingsInRange(stationId, startTime, endTime, isStaffOrAdmin);
     res.json({ success: true, data: readings, count: readings.length });
   } catch (err) {
     console.error(`[API /readings/${stationId}/range] Error:`, err.message);

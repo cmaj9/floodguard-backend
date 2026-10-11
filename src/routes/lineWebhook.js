@@ -61,7 +61,7 @@ async function handleLineEvent(event) {
     const profile = await getUserProfile(userId);
     const displayName = profile?.displayName || 'ผู้ใช้ LINE';
 
-    // Auto-create or ensure citizen account exists in both users and line_subscribers
+    // Auto-create or ensure citizen account exists in users table
     let citizen = await getCitizenByLineId(userId);
     if (!citizen) {
       try {
@@ -102,7 +102,7 @@ async function handleLineEvent(event) {
     const text = event.message.text.trim();
     const webUrl = getWebUrl();
 
-    // Auto-ensure subscriber is registered in line_subscribers
+    // Auto-ensure subscriber is registered in users table
     if (userId) {
       saveOrUpdateSubscriber({ lineUserId: userId }).catch((err) => {
         console.warn('[LINE Webhook] saveOrUpdateSubscriber error:', err.message);
@@ -227,14 +227,6 @@ async function handleLineEvent(event) {
     console.log(`[LINE Webhook] User unfollowed/blocked: ${userId}`);
     if (userId) {
       await deactivateSubscriber(userId);
-      try {
-        await db.query(
-          `UPDATE users SET line_user_id = NULL, updated_at = NOW() WHERE line_user_id = $1`,
-          [userId]
-        );
-      } catch (err) {
-        console.error('[LINE Webhook] Unfollow error:', err.message);
-      }
     }
   }
 }

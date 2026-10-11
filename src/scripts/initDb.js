@@ -34,10 +34,7 @@ async function initDb() {
 
     const sqlFiles = [
       'init.sql',
-      'add_users.sql',
-      'add_alert_types.sql',
-      'add_line_subscribers.sql',
-      'migrate_relative_level.sql',
+      'optimize_database_schema.sql',
     ];
 
     for (const file of sqlFiles) {
@@ -53,9 +50,12 @@ async function initDb() {
     console.log('[OK] All database schemas initialized successfully!');
   } catch (err) {
     console.error('[ERROR] Failed to initialize database:', err.message);
-    process.exit(1);
+    if (require.main === module) {
+      process.exit(1);
+    }
+    throw err;
   } finally {
-    await client.end();
+    await client.end().catch(() => {});
   }
 }
 

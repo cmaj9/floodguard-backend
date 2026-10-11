@@ -103,9 +103,6 @@ async function runPullSync() {
       TRUNCATE TABLE
         readings,
         alerts,
-        gateway_mapping,
-        station_mapping,
-        mcu,
         station,
         gateway,
         notification_settings,
@@ -116,10 +113,7 @@ async function runPullSync() {
 
     // 4. Mirror all tables in dependency order
     await mirrorTable('gateway');
-    await mirrorTable('gateway_mapping');
     await mirrorTable('station');
-    await mirrorTable('mcu');
-    await mirrorTable('station_mapping');
     await mirrorTable('users');
     await mirrorTable('notification_settings');
     await mirrorTable('alerts');

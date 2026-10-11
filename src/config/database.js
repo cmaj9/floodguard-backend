@@ -14,6 +14,10 @@ types.setTypeParser(1114, (stringValue) => {
   return new Date(iso + '+07:00');
 });
 
+// Automatically parse PostgreSQL NUMERIC / DECIMAL (OID 1700) as float
+// Prevents strings from being returned and causing toFixed() errors on numbers
+types.setTypeParser(1700, (val) => (val === null ? null : parseFloat(val)));
+
 const poolConfig = process.env.DATABASE_URL
   ? {
       connectionString: process.env.DATABASE_URL,
@@ -32,18 +36,18 @@ const poolConfig = process.env.DATABASE_URL
 
 const pool = new Pool({
   ...poolConfig,
+  options: '-c timezone=Asia/Bangkok',
   // Connection pool settings
   max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
 });
 
-// Test connection on startup and enforce Asia/Bangkok session timezone
-pool.on('connect', (client) => {
-  console.log('[DB] Connected to PostgreSQL');
-  client.query("SET timezone = 'Asia/Bangkok'").catch((err) => {
-    console.warn('[DB] Failed to set session timezone:', err.message);
-  });
+// Test connection on startup
+pool.on('connect', () => {
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('[DB] Connected to PostgreSQL');
+  }
 });
 
 pool.on('error', (err) => {

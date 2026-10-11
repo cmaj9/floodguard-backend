@@ -14,6 +14,9 @@ const { getMqttStatus } = require('./config/mqtt');
 
 const app = express();
 
+// Trust reverse proxy (Railway, Vercel, Nginx)
+app.set('trust proxy', 1);
+
 const allowedOrigins = [
   process.env.FRONTEND_URL,
   'https://waterwatch-frontend-mu.vercel.app',
@@ -61,7 +64,34 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
+const rateLimit = require('express-rate-limit');
+
+// Basic security headers
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  next();
+});
+
+// Rate limiter for authentication endpoints: max 5 attempts per 15 minutes per IP
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { trustProxy: false },
+  message: {
+    success: false,
+    error: 'มีการพยายามเข้าสู่ระบบมากเกินไป กรุณารอ 15 นาทีแล้วลองใหม่อีกครั้ง',
+    code: 'RATE_LIMIT_EXCEEDED',
+  },
+});
+
 // ── Routes ────────────────────────────────────────────────────────
+app.use('/api/auth/login', authLimiter);
+app.use('/api/users/login', authLimiter);
+
 app.use('/api/auth', usersRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/alerts', alertsRouter);
@@ -70,6 +100,16 @@ app.use('/api/notifications', notificationSettingsRouter);
 app.use('/api/readings', readingsRouter);
 app.use('/api/stations', stationsRouter);
 app.use('/api/internal', syncRouter);
+
+// Root health check endpoint (supports Railway, UptimeRobot, load balancers)
+app.get('/', (_req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    service: 'FloodGuard Telemetry & Alert API',
+    version: '1.2.0',
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // Health check endpoint
 app.get('/health', (_req, res) => {

@@ -84,7 +84,7 @@ router.post('/citizen-register', async (req, res) => {
 });
 
 // ── POST /api/users/setup-credentials ─────────────────────────────
-router.post('/setup-credentials', async (req, res) => {
+router.post('/setup-credentials', authenticateToken, async (req, res) => {
   try {
     const { userId, lineUserId, email, password } = req.body;
     if (!email || !email.trim()) {
@@ -97,8 +97,14 @@ router.post('/setup-credentials', async (req, res) => {
       return res.status(400).json({ success: false, error: 'ไม่พบข้อมูลยืนยันตัวตนของผู้ใช้ (userId หรือ lineUserId)' });
     }
 
+    // Ownership check: Prevent account takeover by verifying caller is modifying their own account or is an admin
+    const callerId = String(req.user.id);
+    if (req.user.role !== 'admin' && userId && String(userId) !== callerId) {
+      return res.status(403).json({ success: false, error: 'คุณไม่มีสิทธิ์แก้ไขข้อมูลของบัญชีอื่น' });
+    }
+
     const updatedUser = await userService.setupCitizenCredentials({
-      userId,
+      userId: userId || callerId,
       lineUserId,
       email,
       password,
@@ -118,7 +124,7 @@ router.post('/setup-credentials', async (req, res) => {
 });
 
 // ── POST /api/users/link-line ────────────────────────────────────
-router.post('/link-line', async (req, res) => {
+router.post('/link-line', authenticateToken, async (req, res) => {
   try {
     const { userId, lineUserId, displayName, pictureUrl } = req.body;
     if (!userId) {
@@ -126,6 +132,12 @@ router.post('/link-line', async (req, res) => {
     }
     if (!lineUserId || !lineUserId.trim()) {
       return res.status(400).json({ success: false, error: 'ไม่พบรหัสผู้ใช้ LINE (lineUserId)' });
+    }
+
+    // Ownership check
+    const callerId = String(req.user.id);
+    if (req.user.role !== 'admin' && String(userId) !== callerId) {
+      return res.status(403).json({ success: false, error: 'คุณไม่มีสิทธิ์เชื่อมต่อ LINE ให้กับบัญชีอื่น' });
     }
 
     const updatedUser = await userService.linkLineToUser(userId, lineUserId, displayName, pictureUrl);

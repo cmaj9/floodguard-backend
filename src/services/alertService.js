@@ -92,7 +92,7 @@ async function isAlertOnCooldown(stationId, alertType, cooldownMinutes = ALERT_C
 /**
  * Save alert to database and dispatch LINE Flex notifications to subscribed users
  */
-async function saveAndNotify({ stationId, stationName, alertType, severity = null, value, threshold, message, refName, station, cooldownMinutes }) {
+async function saveAndNotify({ stationId, stationName, alertType, severity = null, value, threshold, message, refName, station, cooldownMinutes, isManualOffline = false }) {
   try {
     const effectiveCooldown = cooldownMinutes || ALERT_COOLDOWN_MINUTES;
     // 1. Check cooldown to avoid flooding users (with severity escalation support)
@@ -122,8 +122,8 @@ async function saveAndNotify({ stationId, stationName, alertType, severity = nul
     const savedAlert = res.rows[0];
     console.log(`[AlertService] Alert created: ${savedAlert.alert_id} | ${alertType} (${severity || 'default'}) | Station: ${stationId} | ${message}`);
 
-    // 3. Find LINE user IDs to notify based on role & alert type
-    const lineUserIds = await getLineRecipientsForAlert(stationId, alertType);
+    // 3. Find LINE user IDs to notify based on role & alert type (citizens suppressed if isManualOffline)
+    const lineUserIds = await getLineRecipientsForAlert(stationId, alertType, isManualOffline);
     if (lineUserIds.length > 0) {
       // Build rich LINE Flex Message Carousel (3 Cards)
       const flexMsg = createAlertFlexMessage({
@@ -140,7 +140,7 @@ async function saveAndNotify({ stationId, stationName, alertType, severity = nul
 
       await sendLineAlert(lineUserIds, flexMsg);
     } else {
-      console.log(`[AlertService] No LINE subscribers found for station ${stationId}`);
+      console.log(`[AlertService] No LINE subscribers found for station ${stationId} (manual_offline=${isManualOffline})`);
     }
 
     return savedAlert;
@@ -156,7 +156,7 @@ async function saveAndNotify({ stationId, stationName, alertType, severity = nul
  * - Critical Level: Triggers when water_level >= critical_level - safety_offset (early warning)
  * - Escalation: Escalation from Warning to Critical bypasses cooldown immediately
  */
-async function checkWaterLevel(station, fields, settings) {
+async function checkWaterLevel(station, fields, settings, isManualOffline = false) {
   if (settings.water_level_enabled === false) return;
   if (fields.water_level == null) return;
 
@@ -179,6 +179,8 @@ async function checkWaterLevel(station, fields, settings) {
         ? `ระดับน้ำใกล้แตะจุดวิกฤต (เผื่อความปลอดภัย ${offset.toFixed(2)} ม.)`
         : `ระดับน้ำแตะเกณฑ์วิกฤต`;
 
+      const manualOfflineNotice = isManualOffline ? ' [โหมดทดสอบ: เฉพาะเจ้าหน้าที่]' : '';
+
       await saveAndNotify({
         stationId: station.station_id,
         stationName: station.station_name,
@@ -188,11 +190,15 @@ async function checkWaterLevel(station, fields, settings) {
         threshold: station.critical_level,
         refName,
         cooldownMinutes: cooldownMin,
-        message: `${headline} ${formatLevel(current)} ม. (${relativeDesc}) แตะเกณฑ์ ${formatLevel(station.critical_level)} ม.`,
+        isManualOffline,
+        message: `${headline} ${formatLevel(current)} ม. (${relativeDesc}) แตะเกณฑ์ ${formatLevel(station.critical_level)} ม.${manualOfflineNotice}`,
       });
       return;
     }
   }
+
+  // In manual offline mode, warning alerts are suppressed (only critical triggers staff notification)
+  if (isManualOffline) return;
 
   // 2. Warning check (Safety Offset NOT applied to warning level, per user specification)
   if (station.warning_level != null) {
@@ -211,6 +217,7 @@ async function checkWaterLevel(station, fields, settings) {
         threshold: station.warning_level,
         refName,
         cooldownMinutes: cooldownMin,
+        isManualOffline: false,
         message: `ระดับน้ำแตะเกณฑ์เฝ้าระวัง ${formatLevel(current)} ม. (${relativeDesc}) แตะเกณฑ์ ${formatLevel(station.warning_level)} ม.`,
       });
     }
@@ -220,7 +227,7 @@ async function checkWaterLevel(station, fields, settings) {
 /**
  * Check Sensor Blind Zone Condition
  */
-async function checkBlindZone(station, fields, settings = {}) {
+async function checkBlindZone(station, fields, settings = {}, isManualOffline = false) {
   if (fields.is_blind_zone && fields.raw_distance != null) {
     const limit = station.blind_zone_offset || 0.28;
     await saveAndNotify({
@@ -232,6 +239,7 @@ async function checkBlindZone(station, fields, settings = {}) {
       threshold: limit,
       refName: station.reference_point_name,
       cooldownMinutes: settings.water_level_cooldown_minutes || 30,
+      isManualOffline,
       message: `ผิวน้ำเข้าใกล้หัวเซนเซอร์ในระยะบอด (${fields.raw_distance.toFixed(2)} ม. <= ${limit.toFixed(2)} ม.) เซนเซอร์อาจจมน้ำหรืออ่านค่าคลาดเคลื่อน`,
     });
   }
@@ -276,6 +284,7 @@ async function checkRateOfRise(station, fields, settings, currentTimestamp = new
           threshold,
           refName: station.reference_point_name,
           cooldownMinutes: settings.rate_of_rise_cooldown_minutes || 30,
+          isManualOffline: false,
           message: `อัตราการเพิ่มของระดับน้ำสูงผิดปกติ +${ratePerHour.toFixed(2)} ม./ชม. (เกณฑ์ ${threshold} ม./ชม.)`,
         });
       }
@@ -288,7 +297,7 @@ async function checkRateOfRise(station, fields, settings, currentTimestamp = new
 /**
  * Check Condition 4: Battery Level Low (แบตเตอรี่ของอุปกรณ์ต่ำกว่าค่าที่กำหนด)
  */
-async function checkBatteryLevel(station, fields, settings) {
+async function checkBatteryLevel(station, fields, settings, isManualOffline = false) {
   if (settings.battery_low_enabled === false) return;
   if (fields.battery_percent == null) return;
 
@@ -303,6 +312,7 @@ async function checkBatteryLevel(station, fields, settings) {
       threshold,
       refName: station.reference_point_name,
       cooldownMinutes: settings.battery_low_cooldown_minutes || 120,
+      isManualOffline,
       message: `ระดับแบตเตอรี่สถานีต่ำ ${fields.battery_percent}% (เกณฑ์ <= ${threshold}%)`,
     });
   }
@@ -457,7 +467,7 @@ async function checkOnlineRecovery(station, fields, settings, currentTimestamp) 
 async function checkReadingAlerts(stationId, fields, timestamp = new Date()) {
   try {
     const stationRes = await db.query(
-      `SELECT station_id, station_name, status, reference_point_name, blind_zone_offset, warning_level, critical_level, latitude, longitude
+      `SELECT station_id, station_name, status, reference_point_name, blind_zone_offset, warning_level, critical_level, latitude, longitude, manual_offline_at
        FROM station
        WHERE station_id = $1 LIMIT 1`,
       [stationId]
@@ -466,25 +476,29 @@ async function checkReadingAlerts(stationId, fields, timestamp = new Date()) {
     if (stationRes.rows.length === 0) return;
     const station = stationRes.rows[0];
 
-    // REQUIREMENT: Stations set to offline must not trigger any alerts
-    if (station.status !== 'active') {
+    // If station is maintenance or decommissioned offline (without manual_offline_at), skip all alerts
+    if (station.status === 'maintenance' || (station.status === 'offline' && !station.manual_offline_at)) {
       console.log(`[AlertService] Station ${stationId} is status '${station.status}', skipping all alerts`);
       return;
     }
 
+    const isManualOffline = Boolean(station.status === 'offline' && station.manual_offline_at);
+
     // Retrieve active notification thresholds (custom station settings or global)
     const settings = await getSettings(stationId);
 
-    // 0. Check Online Recovery if station was previously offline
-    await checkOnlineRecovery(station, fields, settings, timestamp);
+    // 0. Check Online Recovery ONLY if station is active (not during manual offline mode)
+    if (!isManualOffline && station.status === 'active') {
+      await checkOnlineRecovery(station, fields, settings, timestamp);
+    }
 
     // Run checks concurrently
     await Promise.allSettled([
-      checkWaterLevel(station, fields, settings),
-      checkBlindZone(station, fields, settings),
-      checkRateOfRise(station, fields, settings, timestamp),
-      checkBatteryLevel(station, fields, settings),
-      checkGeofence(station, fields, settings),
+      checkWaterLevel(station, fields, settings, isManualOffline),
+      checkBlindZone(station, fields, settings, isManualOffline),
+      !isManualOffline ? checkRateOfRise(station, fields, settings, timestamp) : Promise.resolve(),
+      checkBatteryLevel(station, fields, settings, isManualOffline),
+      !isManualOffline ? checkGeofence(station, fields, settings) : Promise.resolve(),
     ]);
   } catch (err) {
     console.error('[AlertService] checkReadingAlerts error:', err.message);
@@ -492,12 +506,59 @@ async function checkReadingAlerts(stationId, fields, timestamp = new Date()) {
 }
 
 /**
+ * Check Gateway Heartbeats
+ * If gateway hasn't received any packets for > 15 minutes, mark as offline
+ * and notify admin/staff users.
+ */
+async function checkGatewayHeartbeats() {
+  try {
+    const GATEWAY_TIMEOUT_MINUTES = 15;
+    const res = await db.query(
+      `SELECT gateway_id, gateway_name, status, last_update
+       FROM gateway`
+    );
+
+    for (const gw of res.rows) {
+      if (!gw.last_update) continue;
+      const minutesSinceUpdate = Math.round((Date.now() - new Date(gw.last_update).getTime()) / (1000 * 60));
+
+      if (minutesSinceUpdate >= GATEWAY_TIMEOUT_MINUTES) {
+        if (gw.status !== 'offline') {
+          // Update DB
+          await db.query(`UPDATE gateway SET status = 'offline' WHERE gateway_id = $1`, [gw.gateway_id]);
+          console.warn(`[AlertService] Gateway ${gw.gateway_name || gw.gateway_id} marked OFFLINE (inactive for ${minutesSinceUpdate}m)`);
+
+          // Find affected stations
+          const affRes = await db.query(
+            `SELECT station_id, station_name FROM station WHERE gateway_id = $1`,
+            [gw.gateway_id]
+          );
+          const affectedStations = affRes.rows.map(s => `${s.station_name} (${s.station_id})`).join(', ') || 'ไม่มี';
+
+          // Notify admins/staff via LINE OA
+          const lineUserIds = await getLineRecipientsForAlert(null, 'offline');
+          if (lineUserIds && lineUserIds.length > 0) {
+            const message = `⚠️ แจ้งเตือนเกตเวย์ออฟไลน์\nเกตเวย์: ${gw.gateway_name || gw.gateway_id}\nขาดการเชื่อมต่อ: ${minutesSinceUpdate} นาที\nสถานีที่ได้รับผลกระทบ: ${affectedStations}\nกรุณาตรวจสอบระบบโครงข่ายหรือแหล่งจ่ายไฟ`;
+            await sendLineAlert(lineUserIds, message).catch(err => console.error('[AlertService] Failed to send GW alert:', err.message));
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[AlertService] checkGatewayHeartbeats error:', err.message);
+  }
+}
+
+/**
  * Check Condition 3: Offline Stations (ไม่มีการส่งข้อมูลเข้าเว็บแอปพลิเคชันภายในระยะเวลาที่กำหนด)
- * Called every 5 minutes from server.js
+ * Called every 1 minute from server.js
  * Automatically ignores stations deliberately marked as 'offline' or 'maintenance'
  */
 async function checkOfflineStations() {
   try {
+    // 1. Check Gateway heartbeats first
+    await checkGatewayHeartbeats();
+
     const globalSettings = await getSettings(null);
     if (globalSettings.offline_timeout_enabled === false) {
       return;
@@ -507,11 +568,11 @@ async function checkOfflineStations() {
 
     // Only inspect stations that are supposed to be active
     const res = await db.query(
-      `SELECT s.station_id, s.station_name, s.reference_point_name, MAX(r.timestamp) as last_seen
+      `SELECT s.station_id, s.station_name, s.reference_point_name, s.status_updated_at, MAX(r.timestamp) as last_seen
        FROM station s
        LEFT JOIN readings r ON r.station_id = s.station_id
        WHERE s.status = 'active'
-       GROUP BY s.station_id, s.station_name, s.reference_point_name`
+       GROUP BY s.station_id, s.station_name, s.reference_point_name, s.status_updated_at`
     );
 
     for (const station of res.rows) {
@@ -519,8 +580,12 @@ async function checkOfflineStations() {
       if (stationSettings.offline_timeout_enabled === false) continue;
 
       const timeoutMinutes = stationSettings.offline_timeout_minutes || defaultTimeout;
-      const minutesOffline = station.last_seen
-        ? Math.round((new Date() - new Date(station.last_seen)) / (1000 * 60))
+      const lastSeenTime = station.last_seen ? new Date(station.last_seen).getTime() : 0;
+      const statusUpdatedTime = station.status_updated_at ? new Date(station.status_updated_at).getTime() : 0;
+      const lastActiveTime = Math.max(lastSeenTime, statusUpdatedTime);
+
+      const minutesOffline = lastActiveTime > 0
+        ? Math.round((Date.now() - lastActiveTime) / (1000 * 60))
         : timeoutMinutes + 1;
 
       if (minutesOffline >= timeoutMinutes) {
@@ -603,6 +668,83 @@ async function acknowledgeAlert(alertId) {
   return res.rows[0];
 }
 
+/**
+ * Evaluates a station's latest telemetry immediately against its newly saved notification settings.
+ * If conditions match (e.g. water level >= critical - safety_offset, battery low, rate of rise, etc.),
+ * an alert is dispatched immediately to LINE OA and stored in database.
+ * Returns array of alerts created.
+ */
+async function evaluateStationAlertsNow(stationId) {
+  try {
+    const stationRes = await db.query(
+      `SELECT station_id, station_name, status, reference_point_name, blind_zone_offset, warning_level, critical_level, latitude, longitude
+       FROM station
+       WHERE station_id = $1 LIMIT 1`,
+      [stationId]
+    );
+    if (stationRes.rows.length === 0) return [];
+    const station = stationRes.rows[0];
+
+    if (station.status !== 'active') {
+      console.log(`[AlertService] Station ${stationId} is status '${station.status}', skipping immediate alert evaluation`);
+      return [];
+    }
+
+    const readingRes = await db.query(
+      `SELECT * FROM readings WHERE station_id = $1 ORDER BY timestamp DESC LIMIT 1`,
+      [stationId]
+    );
+    if (readingRes.rows.length === 0) return [];
+    const fields = readingRes.rows[0];
+
+    const settings = await getSettings(stationId);
+
+    // Check all rules concurrently
+    await Promise.allSettled([
+      checkWaterLevel(station, fields, settings),
+      checkBlindZone(station, fields, settings),
+      checkRateOfRise(station, fields, settings, new Date(fields.timestamp || Date.now())),
+      checkBatteryLevel(station, fields, settings),
+      checkGeofence(station, fields, settings),
+    ]);
+
+    // Also check offline timeout if enabled
+    if (settings.offline_timeout_enabled !== false) {
+      const timeoutMinutes = settings.offline_timeout_minutes || 30;
+      const minutesOffline = fields.timestamp
+        ? Math.round((Date.now() - new Date(fields.timestamp).getTime()) / (1000 * 60))
+        : timeoutMinutes + 1;
+
+      if (minutesOffline >= timeoutMinutes) {
+        await saveAndNotify({
+          stationId: station.station_id,
+          stationName: station.station_name,
+          alertType: 'offline',
+          value: minutesOffline,
+          threshold: timeoutMinutes,
+          refName: station.reference_point_name,
+          cooldownMinutes: settings.offline_cooldown_minutes || 60,
+          message: `สถานีขาดการส่งข้อมูลเข้าสู่ระบบเป็นเวลา ${minutesOffline} นาที (เกณฑ์ ${timeoutMinutes} นาที)`,
+        });
+      }
+    }
+
+    // Fetch alerts created in the last 15 seconds for this station
+    const recentAlertsRes = await db.query(
+      `SELECT alert_id, station_id, alert_type, value, threshold, message, timestamp
+       FROM alerts
+       WHERE station_id = $1 AND timestamp >= NOW() - INTERVAL '15 seconds'
+       ORDER BY timestamp DESC`,
+      [stationId]
+    );
+
+    return recentAlertsRes.rows;
+  } catch (err) {
+    console.error(`[AlertService] evaluateStationAlertsNow error for ${stationId}:`, err.message);
+    return [];
+  }
+}
+
 module.exports = {
   checkReadingAlerts,
   checkOfflineStations,
@@ -610,4 +752,5 @@ module.exports = {
   acknowledgeAlert,
   saveAndNotify,
   checkWaterLevel,
+  evaluateStationAlertsNow,
 };

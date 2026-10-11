@@ -92,32 +92,12 @@ async function runMirrorSync() {
       try { await targetPool.query(eq); } catch (_) {}
     }
 
-    const migrationSqlPath = path.join(__dirname, '../../sql/migrate_relative_level.sql');
-    if (fs.existsSync(migrationSqlPath)) {
-      const migrationSql = fs.readFileSync(migrationSqlPath, 'utf8');
-      await targetPool.query(migrationSql);
-      console.log('[Mirror] [OK] Schema migrations applied on Railway.');
+    const optimizeSqlPath = path.join(__dirname, '../../sql/optimize_database_schema.sql');
+    if (fs.existsSync(optimizeSqlPath)) {
+      const optSql = fs.readFileSync(optimizeSqlPath, 'utf8');
+      await targetPool.query(optSql);
+      console.log('[Mirror] [OK] Schema optimization applied on Railway.');
     }
-
-    // Ensure notification_settings table exists
-    await targetPool.query(`
-      CREATE TABLE IF NOT EXISTS notification_settings (
-        setting_id SERIAL PRIMARY KEY,
-        station_id VARCHAR(50) UNIQUE,
-        water_level_enabled BOOLEAN DEFAULT true,
-        safety_offset FLOAT DEFAULT 0.0,
-        rate_of_rise_enabled BOOLEAN DEFAULT true,
-        rate_of_rise_threshold FLOAT DEFAULT 0.30,
-        offline_timeout_enabled BOOLEAN DEFAULT true,
-        offline_timeout_minutes INTEGER DEFAULT 30,
-        battery_low_enabled BOOLEAN DEFAULT true,
-        battery_low_threshold FLOAT DEFAULT 20.0,
-        geofence_enabled BOOLEAN DEFAULT true,
-        geofence_radius_meters FLOAT DEFAULT 100.0,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-      );
-    `);
 
     // 3. Clear target database completely so it's not mixed with old junk/test data
     console.log('[Mirror] Cleaning old target data (TRUNCATE CASCADE)...');
@@ -125,9 +105,6 @@ async function runMirrorSync() {
       TRUNCATE TABLE
         readings,
         alerts,
-        gateway_mapping,
-        station_mapping,
-        mcu,
         station,
         gateway,
         notification_settings,
@@ -138,10 +115,7 @@ async function runMirrorSync() {
 
     // 4. Mirror all tables in foreign-key dependency order
     await mirrorTable('gateway');
-    await mirrorTable('gateway_mapping');
     await mirrorTable('station');
-    await mirrorTable('mcu');
-    await mirrorTable('station_mapping');
     await mirrorTable('users');
     await mirrorTable('notification_settings');
     await mirrorTable('alerts');

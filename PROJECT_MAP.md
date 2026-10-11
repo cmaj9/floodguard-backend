@@ -151,17 +151,14 @@ Project/
   - Primary Query Keys: `['stations']`, `['readings']`, `['readings-history']`, `['alerts']`, `['notification-settings']`.
 
 ### Database Schemas & Migrations (`Project_Backend/sql/`)
-- **`init.sql`**: Core table definitions:
-  - `gateway`: LoRa gateways (`gateway_id`, `gateway_name`, `ip_address`, `status`, `last_update`).
-  - `station`: Monitoring stations (`station_id`, `gateway_id`, `station_name`, `station_type`, `location_name`, `latitude`, `longitude`, `status`, `warning_level`, `critical_level`).
-  - `mcu`: Microcontroller telemetry records (`mcu_id`, `station_id`, `model`, `firmware_version`, `signal_strength`, `battery_level`).
+- **`init.sql`**: Consolidated 6-table unified database schema:
+  - `gateway`: LoRa gateways (`gateway_id`, `gateway_name`, `ip_address`, `chirpstack_id`, `chirpstack_ids`, `status`, `last_update`).
+  - `station`: Monitoring stations & hardware telemetry (`station_id`, `gateway_id`, `station_name`, `station_type`, `location_name`, `latitude`, `longitude`, `status`, `status_updated_at`, `manual_offline_at`, `dev_eui`, `dev_euis`, `payload_id`, `model`, `firmware_version`, `sensor_to_ref_distance`, `reference_point_name`, `blind_zone_offset`, `tilt_compensation_enabled`, `tilt_offset_x`, `tilt_offset_y`, `warning_level`, `critical_level`, `max_level`, `normal_max`).
+  - `users`: Consolidated users & LINE subscribers (`user_id`, `name`, `email`, `password_hash`, `role`, `picture_url`, `line_user_id`, `station_ids`, `is_active`, `is_credentials_set`, `created_at`, `updated_at`).
   - `readings`: Time-series sensor log (`reading_id`, `station_id`, `timestamp`, `raw_distance`, `water_level`, `temperature`, `humidity`, `battery_voltage`, `battery_percent`, `rssi`, `snr`, `tilt_x`, `tilt_y`, `latitude`, `longitude`).
-  - `alerts`: Event log with auto-generated ID trigger (`alert_id`, `station_id`, `timestamp`, `alert_type`, `value`, `threshold`, `message`, `status`).
-  - `station_mapping` & `gateway_mapping`: Payload hardware-to-database foreign key mappings.
-- **`add_users.sql`**: Multi-role account store (`users` table with `UserRole` enum `'citizen' | 'staff' | 'admin'`, bcrypt password hash, assigned `station_ids` array, and `line_user_id`).
-- **`add_line_subscribers.sql`**: Separate subscriber store (`line_subscribers` table) storing citizen followers and subscribed stations.
-- **`add_credentials_set.sql`**: Tracks whether a citizen has upgraded their account to email/password.
-- **`migrate_relative_level.sql`**: Schema alterations adding reference point distance (`sensor_to_ref_distance`), reference label (`reference_point_name`), ultrasonic blind zone (`blind_zone_offset`), and calibration tilt offsets (`tilt_offset_x`, `tilt_offset_y`).
+  - `alerts`: Event log with auto-generated 6-digit ID trigger (`alert_id`, `station_id`, `timestamp`, `alert_type`, `value`, `threshold`, `message`, `status`).
+  - `notification_settings`: Notification criteria & threshold configs (`setting_id`, `station_id`, `water_level_enabled`, `rate_of_rise_threshold`, `battery_low_threshold`, `offline_timeout_minutes`, `cooldown_minutes`, ...).
+- **`optimize_database_schema.sql`**: Idempotent production zero-loss consolidation script migrating legacy tables (`mcu`, `station_mapping`, `gateway_mapping`, `line_subscribers`) into the 6 unified tables.
 - **Type Definitions (`Project_FontEnd/src/types/index.ts`)**:
   Defines central TypeScript interfaces matching database models (`Reading`, `StationWithReading`, `Station`, `WaterLevelReading`, `AuthUser`, `User`, `DbAlert`, `NotificationSettings`, `SubscriberPreferences`).
 

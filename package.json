@@ -1,6 +1,6 @@
 {
   "name": "floodguard-backend",
-  "version": "1.1.6",
+  "version": "1.2.0",
   "description": "Backend for FloodGuard Water Level Telemetry & Early Warning System - ChirpStack MQTT to PostgreSQL",
   "main": "src/server.js",
   "scripts": {
@@ -16,6 +16,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.22.2",
+    "express-rate-limit": "^8.7.1",
     "jsonwebtoken": "^9.0.3",
     "mqtt": "^5.10.4",
     "node-cron": "^4.6.0",
@@ -24,7 +25,7 @@
   "devDependencies": {
     "nodemon": "^3.1.10"
   },
-  "allowScripts": {
-    "bcrypt@6.0.0": true
+  "engines": {
+    "node": ">=18.0.0"
   }
 }

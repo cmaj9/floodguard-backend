@@ -1,10 +1,12 @@
 const express = require('express');
 const router = express.Router();
+const bcrypt = require('bcrypt');
 const db = require('../config/database');
 const { getSettings, saveSettings, resetStationSettings } = require('../services/notificationSettingService');
 const { saveOrUpdateSubscriber } = require('../services/userService');
 const { getLineQuotaInfo } = require('../services/lineService');
 const { authenticateToken, requireRole } = require('../middleware/auth');
+const { evaluateStationAlertsNow } = require('../services/alertService');
 
 // ── GET /api/notifications/line-quota ─────────────────────────────
 // Get LINE Messaging API monthly quota and current usage status (Admin & Staff)
@@ -35,7 +37,23 @@ router.get('/settings', async (req, res) => {
 router.put('/settings', authenticateToken, requireRole(['admin']), async (req, res) => {
   try {
     const updated = await saveSettings(req.body, null);
-    res.json({ success: true, data: updated, message: 'บันทึกการตั้งค่าการแจ้งเตือนส่วนกลางสำเร็จ' });
+    let triggeredAlerts = [];
+    try {
+      // Evaluate all active stations
+      const activeStationsRes = await db.query(`SELECT station_id FROM station WHERE status = 'active'`);
+      for (const st of activeStationsRes.rows) {
+        const alerts = await evaluateStationAlertsNow(st.station_id);
+        if (alerts && alerts.length > 0) triggeredAlerts.push(...alerts);
+      }
+    } catch (evalErr) {
+      console.error('[NotificationSettings] Immediate global alert eval error:', evalErr.message);
+    }
+
+    const message = triggeredAlerts.length > 0
+      ? `บันทึกการตั้งค่าส่วนกลางสำเร็จ และพบเงื่อนไขตรงตามเกณฑ์ใหม่ (${triggeredAlerts.length} รายการ) จึงส่งการแจ้งเตือนทันที`
+      : 'บันทึกการตั้งค่าการแจ้งเตือนส่วนกลางสำเร็จ';
+
+    res.json({ success: true, data: updated, triggeredAlerts, message });
   } catch (err) {
     console.error('[API /notifications/settings] Error:', err.message);
     res.status(500).json({ success: false, error: 'Failed to save global notification settings' });
@@ -61,7 +79,21 @@ router.put('/settings/:stationId', authenticateToken, requireRole(['admin', 'sta
   const { stationId } = req.params;
   try {
     const updated = await saveSettings(req.body, stationId);
-    res.json({ success: true, data: updated, message: `บันทึกการตั้งค่าแจ้งเตือนเฉพาะสถานี ${stationId} สำเร็จ` });
+    let triggeredAlerts = [];
+    try {
+      triggeredAlerts = await evaluateStationAlertsNow(stationId);
+      if (triggeredAlerts && triggeredAlerts.length > 0) {
+        console.log(`[NotificationSettings] Triggered ${triggeredAlerts.length} immediate alert(s) for station ${stationId} upon settings update`);
+      }
+    } catch (evalErr) {
+      console.error(`[NotificationSettings] Immediate alert eval error for ${stationId}:`, evalErr.message);
+    }
+
+    const message = triggeredAlerts.length > 0
+      ? `บันทึกการตั้งค่าสำเร็จ และพบเงื่อนไขตรงตามเกณฑ์ใหม่ (${triggeredAlerts.length} รายการ) จึงส่งการแจ้งเตือนทันที`
+      : `บันทึกการตั้งค่าแจ้งเตือนเฉพาะสถานี ${stationId} สำเร็จ`;
+
+    res.json({ success: true, data: updated, triggeredAlerts, message });
   } catch (err) {
     console.error(`[API /notifications/settings/${stationId}] Error:`, err.message);
     res.status(500).json({ success: false, error: 'Failed to save station notification settings' });
@@ -87,8 +119,8 @@ router.get('/subscribers/:lineUserId', async (req, res) => {
   const { lineUserId } = req.params;
   try {
     const subRes = await db.query(
-      `SELECT line_user_id, display_name, picture_url, station_ids, is_active, created_at
-       FROM line_subscribers WHERE line_user_id = $1 LIMIT 1`,
+      `SELECT line_user_id, name AS display_name, picture_url, station_ids, is_active, created_at
+       FROM users WHERE line_user_id = $1 LIMIT 1`,
       [lineUserId]
     );
 
@@ -115,31 +147,60 @@ router.get('/subscribers/:lineUserId', async (req, res) => {
 // ── POST /api/notifications/subscribers ───────────────────────────
 // Save or update subscriber preferences from public subscribe page
 router.post('/subscribers', async (req, res) => {
-  const { line_user_id, display_name, station_ids, alert_types } = req.body;
+  const { line_user_id, display_name, station_ids } = req.body;
 
   if (!line_user_id) {
     return res.status(400).json({ success: false, error: 'กรุณาระบุ LINE User ID' });
   }
 
   try {
-    // 1. Update line_subscribers
     const targetStationIds = Array.isArray(station_ids) ? station_ids : [];
-    const query = `
-      INSERT INTO line_subscribers (line_user_id, display_name, station_ids, is_active, updated_at)
-      VALUES ($1, $2, $3, true, NOW())
-      ON CONFLICT (line_user_id) DO UPDATE SET
-        display_name = COALESCE(EXCLUDED.display_name, line_subscribers.display_name),
-        station_ids = EXCLUDED.station_ids,
-        is_active = true,
-        updated_at = NOW()
-      RETURNING *
-    `;
 
-    const result = await db.query(query, [line_user_id, display_name || 'ผู้ใช้ LINE', targetStationIds]);
+    // Check if user exists
+    const existing = await db.query(
+      `SELECT user_id, name FROM users WHERE line_user_id = $1 LIMIT 1`,
+      [line_user_id]
+    );
+
+    let resultRow;
+    if (existing.rows.length > 0) {
+      const updateRes = await db.query(
+        `UPDATE users
+         SET station_ids = $1,
+             name = COALESCE(NULLIF($2, ''), name),
+             is_active = true,
+             updated_at = NOW()
+         WHERE line_user_id = $3
+         RETURNING line_user_id, name AS display_name, picture_url, station_ids, is_active, updated_at`,
+        [targetStationIds, display_name || null, line_user_id]
+      );
+      resultRow = updateRes.rows[0];
+    } else {
+      const cleanId = line_user_id.replace(/[^a-zA-Z0-9]/g, '').slice(-8).toLowerCase();
+      const syntheticEmail = `line_${cleanId}@floodguard.local`;
+      const defaultHash = await bcrypt.hash('citizen1234', 10);
+
+      const insertRes = await db.query(
+        `INSERT INTO users (
+          name, email, password_hash, phone, role, district, line_user_id, station_ids, is_active, is_credentials_set, created_at, updated_at
+        ) VALUES (
+          $1, $2, $3, '', 'citizen', '', $4, $5, true, false, NOW(), NOW()
+        )
+        ON CONFLICT (email) DO UPDATE SET
+          line_user_id = EXCLUDED.line_user_id,
+          name = COALESCE(NULLIF(EXCLUDED.name, ''), users.name),
+          station_ids = EXCLUDED.station_ids,
+          is_active = true,
+          updated_at = NOW()
+        RETURNING line_user_id, name AS display_name, picture_url, station_ids, is_active, updated_at`,
+        [display_name || 'ผู้ใช้ LINE', syntheticEmail, defaultHash, line_user_id, targetStationIds]
+      );
+      resultRow = insertRes.rows[0];
+    }
 
     res.json({
       success: true,
-      data: result.rows[0],
+      data: resultRow,
       message: 'บันทึกการตั้งค่ารับการแจ้งเตือนสำเร็จเรียบร้อยแล้ว',
     });
   } catch (err) {

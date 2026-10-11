@@ -5,23 +5,42 @@ const { testConnection } = require('./config/database');
 const { connectMqtt, disconnectMqtt } = require('./config/mqtt');
 const { checkOfflineStations } = require('./services/alertService');
 
-const PORT = process.env.PORT || 3001;
+const PORT = parseInt(process.env.PORT || '3001', 10);
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Process] Unhandled Rejection at:', promise, 'reason:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[Process] Uncaught Exception:', err);
+});
 
 async function startServer() {
   console.log('==============================================');
   console.log('  FloodGuard — Telemetry & Alert Backend Server');
   console.log('==============================================');
 
-  // 1. Test database connection
+  // 1. Start HTTP server immediately on 0.0.0.0 so Railway / Cloud healthchecks pass instantly
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`\n[Startup] [OK] HTTP server running on http://0.0.0.0:${PORT}`);
+    console.log(`[Startup] Healthcheck: http://0.0.0.0:${PORT}/health`);
+    console.log(`[Startup] Root endpoint: http://0.0.0.0:${PORT}/`);
+  });
+
+  server.on('error', (err) => {
+    console.error('[Startup] HTTP Server error:', err.message);
+  });
+
+  // 2. Test database connection & verify / migrate schema
   console.log('\n[Startup] Connecting to PostgreSQL...');
-  const dbOk = await testConnection();
-  if (!dbOk) {
-    console.error('[Startup] [ERROR] Cannot connect to database. Check .env settings.');
-    console.error('[Startup] Continuing without DB (API will return errors until DB is available)');
-  } else {
-    // Check if database tables exist, auto-initialize if empty
-    try {
+  try {
+    const dbOk = await testConnection();
+    if (!dbOk) {
+      console.error('[Startup] [ERROR] Cannot connect to database. Check DATABASE_URL or .env settings.');
+      console.error('[Startup] Continuing without DB (API will return errors until DB is available)');
+    } else {
       const { query } = require('./config/database');
+
+      // Check if station table exists
       const checkRes = await query(`
         SELECT EXISTS (
           SELECT FROM information_schema.tables 
@@ -29,6 +48,7 @@ async function startServer() {
         );
       `);
       const hasTables = checkRes.rows[0]?.exists;
+
       if (!hasTables) {
         console.log('[Startup] Database tables not found. Auto-initializing schemas...');
         const { initDb } = require('./scripts/initDb');
@@ -37,44 +57,83 @@ async function startServer() {
         await seedUsers().catch((err) => console.warn('[Startup] Seed users note:', err.message));
         console.log('[Startup] [OK] Database auto-initialization complete!');
       } else {
+        // Ensure ENUM types contain latest values (must run OUTSIDE transaction blocks)
+        const enumQueries = [
+          `ALTER TYPE "GatewayStatus" ADD VALUE IF NOT EXISTS 'offline'`,
+          `ALTER TYPE "StationStatus" ADD VALUE IF NOT EXISTS 'offline'`,
+          `ALTER TYPE "AlertType" ADD VALUE IF NOT EXISTS 'rate_of_rise'`,
+          `ALTER TYPE "AlertType" ADD VALUE IF NOT EXISTS 'battery_low'`,
+          `ALTER TYPE "AlertType" ADD VALUE IF NOT EXISTS 'geofence'`,
+          `ALTER TYPE "AlertType" ADD VALUE IF NOT EXISTS 'offline'`,
+          `ALTER TYPE "AlertType" ADD VALUE IF NOT EXISTS 'online'`,
+          `ALTER TYPE "AlertType" ADD VALUE IF NOT EXISTS 'sensor_drift'`,
+        ];
+        for (const eq of enumQueries) {
+          try {
+            await query(eq);
+          } catch (_) {}
+        }
+
+        // Ensure database is migrated to the clean 6-table unified architecture
+        try {
+          const checkLegacy = await query(`
+            SELECT 
+              EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'mcu') AS mcu_exists,
+              EXISTS (SELECT FROM information_schema.columns WHERE table_name = 'station' AND column_name = 'dev_eui') AS dev_eui_exists,
+              EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'line_subscribers') AS subs_exists,
+              EXISTS (SELECT FROM information_schema.columns WHERE table_name = 'station' AND column_name = 'status_updated_at') AS status_updated_at_exists;
+          `);
+          const row = checkLegacy.rows[0];
+          const needsMigration = Boolean(
+            row?.mcu_exists ||
+            !row?.dev_eui_exists ||
+            row?.subs_exists ||
+            !row?.status_updated_at_exists
+          );
+
+          if (needsMigration) {
+            console.log('[Startup] Legacy database schema detected on server. Running zero-loss auto-migration...');
+            const fs = require('fs');
+            const path = require('path');
+            const sqlPath = path.join(__dirname, '../sql/optimize_database_schema.sql');
+            if (fs.existsSync(sqlPath)) {
+              const migrationSql = fs.readFileSync(sqlPath, 'utf8');
+              await query(migrationSql);
+              console.log('[Startup] [OK] Database schema successfully migrated to unified 6-table architecture without data loss!');
+            }
+          } else {
+            console.log('[Startup] Database schema verified: Unified 6-table architecture is up to date.');
+          }
+        } catch (migErr) {
+          console.error('[Startup] Auto-migration warning:', migErr.message);
+        }
+
         // Ensure is_credentials_set column exists in users table
         await query(`
           ALTER TABLE users 
           ADD COLUMN IF NOT EXISTS is_credentials_set BOOLEAN NOT NULL DEFAULT FALSE;
         `).catch((err) => console.warn('[Startup] Column check note:', err.message));
       }
-    } catch (initErr) {
-      console.error('[Startup] Auto-initialization error:', initErr.message);
     }
+  } catch (initErr) {
+    console.error('[Startup] Database initialization error:', initErr.message);
   }
 
-  // 2. Start MQTT subscriber (only when MQTT_BROKER is explicitly configured)
+  // 3. Start MQTT subscriber (only when MQTT_BROKER is explicitly configured)
   if (process.env.MQTT_BROKER && process.env.MQTT_BROKER.trim() !== '') {
     console.log('\n[Startup] Connecting to MQTT broker...');
-    connectMqtt();
+    try {
+      connectMqtt();
+    } catch (mqttErr) {
+      console.warn('[Startup] MQTT connection error:', mqttErr.message);
+    }
   } else {
     console.log('\n[Startup] MQTT_BROKER not configured — running in HTTP Webhook mode.');
     console.log('[Startup] Uplinks will be received via POST /api/readings/webhook from ChirpStack HTTP Integration.');
   }
 
-  // 3. Start HTTP server
-  const server = app.listen(PORT, () => {
-    console.log(`\n[Startup] [OK] HTTP server running on http://localhost:${PORT}`);
-    console.log(`[Startup] API endpoints:`);
-    console.log(`   GET http://localhost:${PORT}/health`);
-    console.log(`   POST http://localhost:${PORT}/api/auth/login`);
-    console.log(`   GET  http://localhost:${PORT}/api/users`);
-    console.log(`   GET  http://localhost:${PORT}/api/alerts`);
-    console.log(`   GET  http://localhost:${PORT}/api/readings`);
-    console.log(`   GET  http://localhost:${PORT}/api/readings/:stationId`);
-    console.log(`   GET  http://localhost:${PORT}/api/readings/:stationId/range?start=...&end=...`);
-    console.log(`   GET  http://localhost:${PORT}/api/stations`);
-    console.log(`   GET  http://localhost:${PORT}/api/stations/:stationId`);
-    console.log('\n Press Ctrl+C to stop\n');
-  });
-
-  // 4. Start periodic offline station check (Condition 1.3) every 5 minutes
-  const OFFLINE_CHECK_INTERVAL = 5 * 60 * 1000;
+  // 4. Start periodic offline station & gateway check every 1 minute
+  const OFFLINE_CHECK_INTERVAL = 1 * 60 * 1000;
   const offlineCheckTimer = setInterval(() => {
     checkOfflineStations().catch((err) => {
       console.error('[Server] Offline stations check error:', err.message);
@@ -85,8 +144,13 @@ async function startServer() {
   setTimeout(() => checkOfflineStations().catch(() => {}), 10000);
 
   // 5. Initialize daily morning (07:00) & evening (18:00) automated water summary scheduler
-  const { initScheduler } = require('./services/schedulerService');
-  const schedulerTasks = initScheduler();
+  let schedulerTasks = null;
+  try {
+    const { initScheduler } = require('./services/schedulerService');
+    schedulerTasks = initScheduler();
+  } catch (schedErr) {
+    console.warn('[Startup] Scheduler initialization warning:', schedErr.message);
+  }
 
   // 6. Graceful shutdown
   const shutdown = (signal) => {
@@ -109,4 +173,6 @@ async function startServer() {
   process.on('SIGINT',  () => shutdown('SIGINT'));
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('[Fatal] startServer error:', err);
+});

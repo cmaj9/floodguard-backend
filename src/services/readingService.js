@@ -82,31 +82,16 @@ function parseChirpStackPayload(payload) {
 }
 
 /**
- * Find station_id by matching mcu records with the device EUI
- * Falls back to checking station directly if no mcu record found
+ * Find station_id by matching device EUI directly against station table
  */
 async function findStationByDevEui(devEui) {
   if (!devEui) return null;
   try {
-    // Check mcu table first (mcu_id = devEUI format or similar)
     const res = await db.query(
-      `SELECT station_id FROM mcu WHERE mcu_id = $1 LIMIT 1`,
+      `SELECT station_id FROM station WHERE dev_eui = $1 OR $1 = ANY(dev_euis) OR station_id = $1 LIMIT 1`,
       [devEui]
     );
-    if (res.rows.length > 0) {
-      return res.rows[0].station_id;
-    }
-
-    // Fallback: check station directly by device_id pattern
-    const res2 = await db.query(
-      `SELECT station_id FROM station WHERE station_id = $1 LIMIT 1`,
-      [devEui]
-    );
-    if (res2.rows.length > 0) {
-      return res2.rows[0].station_id;
-    }
-
-    return null;
+    return res.rows[0]?.station_id || null;
   } catch (err) {
     console.error('[ReadingService] findStationByDevEui error:', err.message);
     return null;
@@ -114,7 +99,7 @@ async function findStationByDevEui(devEui) {
 }
 
 /**
- * Find station_id by matching payload station_id via station_mapping table
+ * Find station_id by matching payload_id directly against station table
  * Supports both number (1, 2) and string ("1", "ST-001")
  */
 async function findStationByPayloadId(payloadStationId) {
@@ -132,7 +117,7 @@ async function findStationByPayloadId(payloadStationId) {
     const numId = parseInt(payloadStationId, 10);
     if (!isNaN(numId)) {
       const res = await db.query(
-        `SELECT station_id FROM station_mapping WHERE payload_station_id = $1 LIMIT 1`,
+        `SELECT station_id FROM station WHERE payload_id = $1 LIMIT 1`,
         [numId]
       );
       if (res.rows.length > 0) {
@@ -148,45 +133,30 @@ async function findStationByPayloadId(payloadStationId) {
 
 /**
  * Update gateway status to 'online' when we receive data through it.
- * Uses gateway_mapping table to translate ChirpStack hex ID → DB gateway_id.
+ * Matches directly on chirpstack_id, chirpstack_ids array, or gateway_id.
+ * Accepts either a ChirpStack payload object or raw gateway ID string.
  */
-async function updateGatewayStatus(payload) {
-  if (!Array.isArray(payload.rxInfo) || payload.rxInfo.length === 0) return;
-  const gw = payload.rxInfo[0];
-  const chirpstackGatewayId = gw.gatewayId;
-  if (!chirpstackGatewayId) return;
+async function updateGatewayStatus(payloadOrId) {
+  let chirpstackGatewayId = null;
+  if (typeof payloadOrId === 'string') {
+    chirpstackGatewayId = payloadOrId;
+  } else if (payloadOrId && Array.isArray(payloadOrId.rxInfo) && payloadOrId.rxInfo.length > 0) {
+    chirpstackGatewayId = payloadOrId.rxInfo[0]?.gatewayId;
+  }
+  if (!chirpstackGatewayId) return null;
+
   try {
-    // 1. Lookup from gateway_mapping table
-    const mapRes = await db.query(
-      `SELECT gateway_id FROM gateway_mapping WHERE chirpstack_gateway_id = $1 LIMIT 1`,
+    const res = await db.query(
+      `UPDATE gateway 
+       SET last_update = NOW(), status = 'online' 
+       WHERE chirpstack_id = $1 OR $1 = ANY(chirpstack_ids) OR gateway_id = $1
+       RETURNING *`,
       [chirpstackGatewayId]
     );
-
-    let targetGatewayId = null;
-    if (mapRes.rows.length > 0) {
-      targetGatewayId = mapRes.rows[0].gateway_id;
-    } else {
-      // 2. Fallback: check if the hex ID exists directly as gateway_id in gateway table
-      const directRes = await db.query(
-        `SELECT gateway_id FROM gateway WHERE gateway_id = $1 LIMIT 1`,
-        [chirpstackGatewayId]
-      );
-      if (directRes.rows.length > 0) {
-        targetGatewayId = directRes.rows[0].gateway_id;
-      }
-    }
-
-    if (!targetGatewayId) {
-      console.warn(`[ReadingService] No gateway mapping found for ChirpStack ID: ${chirpstackGatewayId}`);
-      return;
-    }
-
-    await db.query(
-      `UPDATE gateway SET last_update = NOW(), status = 'online' WHERE gateway_id = $1`,
-      [targetGatewayId]
-    );
+    return res.rows[0] || null;
   } catch (err) {
     console.warn('[ReadingService] updateGatewayStatus warning:', err.message);
+    return null;
   }
 }
 
@@ -238,22 +208,10 @@ async function insertReading(stationId, fields, rssi, snr, timestamp) {
 }
 
 /**
- * Update mcu's last_update, signal_strength, battery_level
+ * Update MCU status (Unified: telemetry is stored in readings and station)
  */
-async function updateMcuStatus(stationId, { rssi, battery_percent }) {
-  try {
-    await db.query(
-      `UPDATE mcu SET
-        signal_strength = COALESCE($1, signal_strength),
-        battery_level   = COALESCE($2, battery_level),
-        last_update     = NOW()
-       WHERE station_id = $3`,
-      [rssi, battery_percent, stationId]
-    );
-  } catch (err) {
-    // Non-critical: log but don't throw
-    console.warn('[ReadingService] updateMcuStatus warning:', err.message);
-  }
+async function updateMcuStatus(_stationId, _data) {
+  // No-op: telemetry values are stored in readings and station tables directly
 }
 
 /**
@@ -346,7 +304,7 @@ async function processUplinkMessage(topic, payloadBuffer) {
 /**
  * Get the latest reading for each station (for dashboard overview)
  */
-async function getLatestReadingsPerStation() {
+async function getLatestReadingsPerStation(isStaffOrAdmin = false) {
   const sql = `
     SELECT DISTINCT ON (r.station_id)
       r.reading_id,
@@ -391,17 +349,17 @@ async function getLatestReadingsPerStation() {
       r.longitude
     FROM readings r
     JOIN station s ON s.station_id = r.station_id
-    WHERE s.status = 'active'
+    WHERE ($1::boolean = true OR s.manual_offline_at IS NULL OR r.timestamp <= s.manual_offline_at)
     ORDER BY r.station_id, r.timestamp DESC
   `;
-  const res = await db.query(sql);
+  const res = await db.query(sql, [isStaffOrAdmin]);
   return res.rows;
 }
 
 /**
  * Get recent readings for a specific station (paginated)
  */
-async function getReadingsByStation(stationId, limit = 100, offset = 0) {
+async function getReadingsByStation(stationId, limit = 100, offset = 0, isStaffOrAdmin = false) {
   const sql = `
     SELECT
       r.reading_id,
@@ -446,17 +404,18 @@ async function getReadingsByStation(stationId, limit = 100, offset = 0) {
     FROM readings r
     JOIN station s ON s.station_id = r.station_id
     WHERE r.station_id = $1
+      AND ($4::boolean = true OR s.manual_offline_at IS NULL OR r.timestamp <= s.manual_offline_at)
     ORDER BY r.timestamp DESC
     LIMIT $2 OFFSET $3
   `;
-  const res = await db.query(sql, [stationId, limit, offset]);
+  const res = await db.query(sql, [stationId, limit, offset, isStaffOrAdmin]);
   return res.rows;
 }
 
 /**
  * Get readings in a time range for a specific station (for charts)
  */
-async function getReadingsInRange(stationId, startTime, endTime) {
+async function getReadingsInRange(stationId, startTime, endTime, isStaffOrAdmin = false) {
   const sql = `
     SELECT
       r.reading_id, r.station_id, r.timestamp,
@@ -490,9 +449,10 @@ async function getReadingsInRange(stationId, startTime, endTime) {
     JOIN station s ON s.station_id = r.station_id
     WHERE r.station_id = $1
       AND r.timestamp BETWEEN $2 AND $3
+      AND ($4::boolean = true OR s.manual_offline_at IS NULL OR r.timestamp <= s.manual_offline_at)
     ORDER BY r.timestamp ASC
   `;
-  const res = await db.query(sql, [stationId, startTime, endTime]);
+  const res = await db.query(sql, [stationId, startTime, endTime, isStaffOrAdmin]);
   return res.rows;
 }
 
@@ -500,7 +460,7 @@ async function getReadingsInRange(stationId, startTime, endTime) {
  * Recalculate historical water_level and is_blind_zone for all readings of a station
  * when calibration parameters (sensor_to_ref_distance, tilt compensation, blind zone) change.
  */
-async function recalculateStationReadings(stationId, sensorToRef, _tiltEnabled = false, blindZoneOffset = 0.28) {
+async function recalculateStationReadings(stationId, sensorToRef, _tiltEnabled = false, blindZoneOffset = 0.28, client = null) {
   const sql = `
     UPDATE readings
     SET
@@ -508,7 +468,8 @@ async function recalculateStationReadings(stationId, sensorToRef, _tiltEnabled =
       is_blind_zone = (raw_distance <= $2)
     WHERE station_id = $3 AND raw_distance IS NOT NULL
   `;
-  const res = await db.query(sql, [Number(sensorToRef), Number(blindZoneOffset), stationId]);
+  const executor = client || db;
+  const res = await executor.query(sql, [Number(sensorToRef), Number(blindZoneOffset), stationId]);
   console.log(`[ReadingService] Recalculated ${res.rowCount} readings for station ${stationId} with D_ref=${sensorToRef}m`);
   return res.rowCount;
 }
@@ -518,7 +479,7 @@ async function recalculateStationReadings(stationId, sensorToRef, _tiltEnabled =
  * Supports timeRange: 'hourly' | 'daily' | 'weekly' for statistical aggregation
  * or raw export if timeRange is not specified.
  */
-async function exportReadingsToCSV({ stationId, startTime, endTime, timeRange }) {
+async function exportReadingsToCSV({ stationId, startTime, endTime, timeRange, isStaffOrAdmin = false }) {
   const conditions = [];
   const values = [];
   let idx = 1;
@@ -556,6 +517,11 @@ async function exportReadingsToCSV({ stationId, startTime, endTime, timeRange })
       conditions.push(`r.timestamp <= $${idx++}`);
       values.push(eDate);
     }
+  }
+
+  // Non-staff callers only see records prior to manual_offline_at if station was taken offline manually
+  if (!isStaffOrAdmin) {
+    conditions.push(`(s.manual_offline_at IS NULL OR r.timestamp <= s.manual_offline_at)`);
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -872,5 +838,8 @@ module.exports = {
   getReadingsInRange,
   recalculateStationReadings,
   exportReadingsToCSV,
+  findStationByDevEui,
+  findStationByPayloadId,
+  updateGatewayStatus,
 };
 

@@ -26,6 +26,8 @@ function formatUser(row) {
     lineUserId: row.line_user_id || null,
     station_ids: row.station_ids || [],
     stationIds: row.station_ids || [],
+    picture_url: row.picture_url || null,
+    pictureUrl: row.picture_url || null,
     is_active: row.is_active !== false,
     isActive: row.is_active !== false,
     is_credentials_set: isCredentialsSet,
@@ -45,7 +47,7 @@ async function loginUser(email, password) {
   }
 
   const res = await db.query(
-    `SELECT user_id, name, email, password_hash, phone, role, district, line_user_id, station_ids, is_active, created_at, updated_at
+    `SELECT user_id, name, email, password_hash, phone, role, district, line_user_id, station_ids, picture_url, is_active, is_credentials_set, created_at, updated_at
      FROM users
      WHERE LOWER(email) = LOWER($1)
      LIMIT 1`,
@@ -75,7 +77,7 @@ async function loginUser(email, password) {
  */
 async function getAllUsers(roleFilter = null) {
   let queryText = `
-    SELECT user_id, name, email, phone, role, district, line_user_id, station_ids, is_active, created_at, updated_at
+    SELECT user_id, name, email, phone, role, district, line_user_id, station_ids, picture_url, is_active, is_credentials_set, created_at, updated_at
     FROM users
   `;
   const params = [];
@@ -96,7 +98,7 @@ async function getAllUsers(roleFilter = null) {
  */
 async function getUserById(userId) {
   const res = await db.query(
-    `SELECT user_id, name, email, phone, role, district, line_user_id, station_ids, is_active, created_at, updated_at
+    `SELECT user_id, name, email, phone, role, district, line_user_id, station_ids, picture_url, is_active, is_credentials_set, created_at, updated_at
      FROM users
      WHERE user_id = $1
      LIMIT 1`,
@@ -122,6 +124,8 @@ async function createUser(data) {
     lineUserId,
     station_ids,
     stationIds,
+    picture_url,
+    pictureUrl,
     is_active = true,
     isActive = true,
   } = data;
@@ -152,13 +156,14 @@ async function createUser(data) {
 
   const finalLineUserId = (line_user_id ?? lineUserId) || null;
   const finalStationIds = (station_ids ?? stationIds) || [];
+  const finalPictureUrl = (picture_url ?? pictureUrl) || null;
   const finalIsActive = (is_active !== undefined) ? !!is_active : (isActive !== undefined ? !!isActive : true);
 
   const res = await db.query(
     `INSERT INTO users (
-      name, email, password_hash, phone, role, district, line_user_id, station_ids, is_active, created_at, updated_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
-    RETURNING user_id, name, email, phone, role, district, line_user_id, station_ids, is_active, created_at, updated_at`,
+      name, email, password_hash, phone, role, district, line_user_id, station_ids, picture_url, is_active, is_credentials_set, created_at, updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, NOW(), NOW())
+    RETURNING user_id, name, email, phone, role, district, line_user_id, station_ids, picture_url, is_active, is_credentials_set, created_at, updated_at`,
     [
       name.trim(),
       email.trim().toLowerCase(),
@@ -168,6 +173,7 @@ async function createUser(data) {
       district.trim(),
       finalLineUserId,
       finalStationIds,
+      finalPictureUrl,
       finalIsActive,
     ]
   );
@@ -195,6 +201,8 @@ async function updateUser(userId, data) {
     lineUserId,
     station_ids,
     stationIds,
+    picture_url,
+    pictureUrl,
     is_active,
     isActive,
   } = data;
@@ -221,6 +229,9 @@ async function updateUser(userId, data) {
   const newStationIds = (station_ids !== undefined || stationIds !== undefined)
     ? ((station_ids ?? stationIds) || [])
     : current.station_ids;
+  const newPictureUrl = (picture_url !== undefined || pictureUrl !== undefined)
+    ? ((picture_url ?? pictureUrl) || null)
+    : current.picture_url;
   const newIsActive = (is_active !== undefined || isActive !== undefined)
     ? (is_active !== undefined ? !!is_active : !!isActive)
     : current.is_active;
@@ -235,6 +246,7 @@ async function updateUser(userId, data) {
     newDistrict,
     newLineUserId,
     newStationIds,
+    newPictureUrl,
     newIsActive,
     userId,
   ];
@@ -260,11 +272,12 @@ async function updateUser(userId, data) {
          district = $5,
          line_user_id = $6,
          station_ids = $7,
-         is_active = $8
+         picture_url = $8,
+         is_active = $9
          ${passwordHashClause},
          updated_at = NOW()
-     WHERE user_id = $9
-     RETURNING user_id, name, email, phone, role, district, line_user_id, station_ids, is_active, created_at, updated_at`,
+     WHERE user_id = $10
+     RETURNING user_id, name, email, phone, role, district, line_user_id, station_ids, picture_url, is_active, is_credentials_set, created_at, updated_at`,
     params
   );
 
@@ -286,31 +299,52 @@ async function deleteUser(userId) {
 }
 
 /**
- * Save or update a LINE subscriber in line_subscribers table
- * Automatically subscribes to all active stations by default
+ * Save or update a LINE subscriber directly in users table
+ * Default subscription is all stations (empty station_ids array)
  */
 async function saveOrUpdateSubscriber({ lineUserId, displayName, pictureUrl }) {
   if (!lineUserId) return null;
 
   try {
-    // Get all active stations as default subscription
-    const stationsRes = await db.query(`SELECT station_id FROM station WHERE status = 'active'`);
-    const defaultStationIds = stationsRes.rows.map((r) => r.station_id);
-
-    const res = await db.query(
-      `INSERT INTO line_subscribers (
-        line_user_id, display_name, picture_url, station_ids, is_active, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, true, NOW(), NOW())
-      ON CONFLICT (line_user_id) DO UPDATE SET
-        display_name = COALESCE(EXCLUDED.display_name, line_subscribers.display_name),
-        picture_url = COALESCE(EXCLUDED.picture_url, line_subscribers.picture_url),
-        is_active = true,
-        updated_at = NOW()
-      RETURNING *`,
-      [lineUserId, displayName || null, pictureUrl || null, defaultStationIds]
+    const existing = await db.query(
+      `SELECT user_id, name, picture_url FROM users WHERE line_user_id = $1 LIMIT 1`,
+      [lineUserId]
     );
 
-    return res.rows[0];
+    if (existing.rows.length > 0) {
+      const res = await db.query(
+        `UPDATE users
+         SET name = COALESCE(NULLIF($1, ''), name),
+             picture_url = COALESCE($2, picture_url),
+             is_active = true,
+             updated_at = NOW()
+         WHERE line_user_id = $3
+         RETURNING *`,
+        [displayName || null, pictureUrl || null, lineUserId]
+      );
+      return res.rows[0];
+    } else {
+      const cleanId = lineUserId.replace(/[^a-zA-Z0-9]/g, '').slice(-8).toLowerCase();
+      const syntheticEmail = `line_${cleanId}@floodguard.local`;
+      const defaultHash = await bcrypt.hash('citizen1234', SALT_ROUNDS);
+
+      const res = await db.query(
+        `INSERT INTO users (
+          name, email, password_hash, phone, role, district, line_user_id, station_ids, picture_url, is_active, is_credentials_set, created_at, updated_at
+        ) VALUES (
+          $1, $2, $3, '', 'citizen', '', $4, '{}', $5, true, false, NOW(), NOW()
+        )
+        ON CONFLICT (email) DO UPDATE SET
+          line_user_id = EXCLUDED.line_user_id,
+          name = COALESCE(NULLIF(EXCLUDED.name, ''), users.name),
+          picture_url = COALESCE(EXCLUDED.picture_url, users.picture_url),
+          is_active = true,
+          updated_at = NOW()
+        RETURNING *`,
+        [displayName || 'ผู้ใช้ LINE', syntheticEmail, defaultHash, lineUserId, pictureUrl || null]
+      );
+      return res.rows[0];
+    }
   } catch (err) {
     console.error('[UserService] Error saving LINE subscriber:', err.message);
     return null;
@@ -324,7 +358,7 @@ async function deactivateSubscriber(lineUserId) {
   if (!lineUserId) return;
   try {
     await db.query(
-      `UPDATE line_subscribers SET is_active = false, updated_at = NOW() WHERE line_user_id = $1`,
+      `UPDATE users SET is_active = false, updated_at = NOW() WHERE line_user_id = $1`,
       [lineUserId]
     );
   } catch (err) {
@@ -337,18 +371,36 @@ async function deactivateSubscriber(lineUserId) {
  * 1. Public alerts ('water_level', 'rate_of_rise'):
  *    - Admin: all stations
  *    - Staff: assigned stations
- *    - Citizens (users table & line_subscribers table): assigned stations or subscribed to all
+ *    - Citizens: assigned stations or subscribed to all (station_ids = '{}' or NULL)
  * 2. Technical / hardware alerts ('battery', 'offline', 'online', 'tilt', 'geofence', 'sensor_drift'):
  *    - Admin: ALWAYS receives all alerts across all stations without exception
  *    - Staff: assigned stations
  *    - Citizens: EXCLUDED (do not disturb general public)
  * Returns deduplicated array of line_user_ids
  */
-async function getLineRecipientsForAlert(stationId, alertType = 'water_level') {
+async function getLineRecipientsForAlert(stationId, alertType = 'water_level', isManualOffline = false) {
   try {
+    // When station is in manual offline mode (staff testing/calibration),
+    // citizen alerts are suspended. Only admin and staff receive alerts.
+    if (isManualOffline) {
+      const staffQuery = `
+        SELECT line_user_id
+        FROM users
+        WHERE line_user_id IS NOT NULL
+          AND line_user_id != ''
+          AND is_active = true
+          AND (
+            role = 'admin'
+            OR (role = 'staff' AND $1 = ANY(station_ids))
+          )
+      `;
+      const staffRes = await db.query(staffQuery, [stationId]);
+      const staffIds = staffRes.rows.map((r) => r.line_user_id).filter(Boolean);
+      return [...new Set(staffIds)];
+    }
+
     const isPublicAlert = ['water_level', 'rate_of_rise'].includes(alertType);
 
-    // 1. Fetch from `users` table
     let userQuery = '';
     const userParams = [stationId];
 
@@ -381,25 +433,7 @@ async function getLineRecipientsForAlert(stationId, alertType = 'water_level') {
     }
 
     const usersRes = await db.query(userQuery, userParams);
-
-    // 2. Fetch from `line_subscribers` table (Public subscribers)
-    let subsRes = { rows: [] };
-    if (isPublicAlert) {
-      subsRes = await db.query(
-        `SELECT line_user_id
-         FROM line_subscribers
-         WHERE line_user_id IS NOT NULL
-           AND line_user_id != ''
-           AND is_active = true
-           AND ($1 = ANY(station_ids) OR cardinality(station_ids) = 0 OR station_ids IS NULL)`,
-        [stationId]
-      );
-    }
-
-    const allIds = [
-      ...usersRes.rows.map((r) => r.line_user_id),
-      ...subsRes.rows.map((r) => r.line_user_id),
-    ].filter(Boolean);
+    const allIds = usersRes.rows.map((r) => r.line_user_id).filter(Boolean);
 
     // Deduplicate
     return [...new Set(allIds)];
@@ -430,19 +464,7 @@ async function getAllLineRecipientsForSummary() {
          AND is_active = true`
     );
 
-    const subsRes = await db.query(
-      `SELECT line_user_id
-       FROM line_subscribers
-       WHERE line_user_id IS NOT NULL
-         AND line_user_id != ''
-         AND is_active = true`
-    );
-
-    const allIds = [
-      ...usersRes.rows.map((r) => r.line_user_id),
-      ...subsRes.rows.map((r) => r.line_user_id),
-    ].filter(Boolean);
-
+    const allIds = usersRes.rows.map((r) => r.line_user_id).filter(Boolean);
     return [...new Set(allIds)];
   } catch (err) {
     console.error('[UserService] Error getting all LINE recipients for summary:', err.message);
@@ -523,19 +545,6 @@ async function registerCitizen({ lineUserId, name, phone = '', district = '', st
     );
     userRow = iRes.rows[0];
   }
-
-  // Also activate in line_subscribers
-  await db.query(
-    `INSERT INTO line_subscribers (
-      line_user_id, display_name, station_ids, is_active, created_at, updated_at
-    ) VALUES ($1, $2, $3, true, NOW(), NOW())
-    ON CONFLICT (line_user_id) DO UPDATE SET
-      display_name = COALESCE(EXCLUDED.display_name, line_subscribers.display_name),
-      station_ids = EXCLUDED.station_ids,
-      is_active = true,
-      updated_at = NOW()`,
-    [lineUserId, name || 'ประชาชนผู้ใช้งาน', finalStationIds]
-  );
 
   return formatUser(userRow);
 }
@@ -723,33 +732,16 @@ async function linkLineToUser(userId, lineUserId, displayName = null, pictureUrl
   }
   const currentUser = userRes.rows[0];
 
-  // 3. Update user with line_user_id
+  // 3. Update user with line_user_id & optional picture_url
   const updateRes = await db.query(
     `UPDATE users
      SET line_user_id = $1,
+         picture_url = COALESCE($2, picture_url),
          updated_at = NOW()
-     WHERE user_id = $2
-     RETURNING user_id, name, email, phone, role, district, line_user_id, station_ids, is_active, is_credentials_set, created_at, updated_at`,
-    [cleanLineId, userId]
+     WHERE user_id = $3
+     RETURNING user_id, name, email, phone, role, district, line_user_id, station_ids, picture_url, is_active, is_credentials_set, created_at, updated_at`,
+    [cleanLineId, pictureUrl || null, userId]
   );
-
-  // 4. Ensure line_subscribers has this user with their station subscriptions
-  try {
-    const finalStations = currentUser.station_ids || [];
-    await db.query(
-      `INSERT INTO line_subscribers (
-        line_user_id, display_name, station_ids, is_active, created_at, updated_at
-      ) VALUES ($1, $2, $3, true, NOW(), NOW())
-      ON CONFLICT (line_user_id) DO UPDATE SET
-        display_name = COALESCE(EXCLUDED.display_name, line_subscribers.display_name),
-        station_ids = EXCLUDED.station_ids,
-        is_active = true,
-        updated_at = NOW()`,
-      [cleanLineId, displayName || currentUser.name || 'ประชาชนผู้ใช้งาน', finalStations]
-    );
-  } catch (subErr) {
-    console.warn('[userService.linkLineToUser] Subscriber upsert warning:', subErr.message);
-  }
 
   return formatUser(updateRes.rows[0]);
 }

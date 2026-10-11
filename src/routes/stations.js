@@ -2,12 +2,14 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
 const { recalculateStationReadings } = require('../services/readingService');
-const { authenticateToken, requireRole } = require('../middleware/auth');
+const { authenticateToken, optionalAuthenticate, requireRole } = require('../middleware/auth');
 
 // ── GET /api/stations ─────────────────────────────────────────────
 // Returns all stations with their latest reading joined
-router.get('/', async (req, res) => {
+router.get('/', optionalAuthenticate, async (req, res) => {
   try {
+    const isStaffOrAdmin = Boolean(req.user && (req.user.role === 'admin' || req.user.role === 'staff'));
+
     const sql = `
       SELECT
         s.station_id,
@@ -16,7 +18,39 @@ router.get('/', async (req, res) => {
         s.location_name,
         s.latitude,
         s.longitude,
-        s.status,
+        -- Calculated dynamic status: 'offline' if timed out or manual offline
+        CASE
+          WHEN s.status = 'maintenance' THEN 'maintenance'
+          WHEN s.status = 'offline' THEN 'offline'
+          WHEN COALESCE(ns.offline_timeout_enabled, true) AND GREATEST(lr.timestamp, s.status_updated_at) IS NOT NULL AND (EXTRACT(EPOCH FROM (NOW() - GREATEST(lr.timestamp, s.status_updated_at))) / 60) >= COALESCE(ns.offline_timeout_minutes, 30) THEN 'offline'
+          ELSE 'active'
+        END AS status,
+        s.status AS manual_status,
+        s.status_updated_at,
+        s.manual_offline_at,
+        (s.status = 'offline' AND s.manual_offline_at IS NOT NULL) AS is_manual_offline,
+        CASE
+          WHEN s.status = 'maintenance' THEN 'maintenance'
+          WHEN s.status = 'offline' THEN 'offline'
+          ELSE 'active'
+        END AS operating_status,
+        CASE
+          WHEN s.status != 'active' THEN false
+          WHEN COALESCE(ns.offline_timeout_enabled, true) AND GREATEST(lr.timestamp, s.status_updated_at) IS NOT NULL AND (EXTRACT(EPOCH FROM (NOW() - GREATEST(lr.timestamp, s.status_updated_at))) / 60) >= COALESCE(ns.offline_timeout_minutes, 30) THEN false
+          ELSE true
+        END AS is_online,
+        COALESCE(ns.offline_timeout_enabled, true) AS offline_timeout_enabled,
+        COALESCE(ns.offline_timeout_minutes, 30)::integer AS offline_timeout_minutes,
+        CASE
+          WHEN lr.timestamp IS NOT NULL THEN
+            ROUND(EXTRACT(EPOCH FROM (NOW() - lr.timestamp)) / 60)::integer
+          ELSE NULL
+        END AS minutes_since_last_reading,
+        CASE
+          WHEN s.status_updated_at IS NOT NULL THEN
+            ROUND(EXTRACT(EPOCH FROM (NOW() - s.status_updated_at)) / 60)::integer
+          ELSE NULL
+        END AS minutes_since_status_update,
         s.sensor_to_ref_distance,
         COALESCE(NULLIF(TRIM(s.reference_point_name), ''), 'จุดอ้างอิง') AS reference_point_name,
         s.blind_zone_offset,
@@ -33,14 +67,11 @@ router.get('/', async (req, res) => {
         s.tilt_offset_x::float AS tilt_offset_x,
         s.tilt_offset_y::float AS tilt_offset_y,
         -- Pure relative water_level based on current sensor_to_ref_distance - raw_distance
-        COALESCE(
-          CASE
-            WHEN lr.raw_distance IS NOT NULL THEN
-              ROUND((s.sensor_to_ref_distance - lr.raw_distance)::numeric, 3)
-            ELSE lr.water_level
-          END,
-          0
-        ) AS water_level,
+        CASE
+          WHEN lr.raw_distance IS NOT NULL THEN
+            ROUND((s.sensor_to_ref_distance - lr.raw_distance)::numeric, 3)
+          ELSE lr.water_level
+        END AS water_level,
         lr.is_blind_zone,
         lr.temperature,
         lr.humidity,
@@ -50,16 +81,20 @@ router.get('/', async (req, res) => {
         lr.snr,
         lr.tilt_x,
         lr.tilt_y,
-        ROUND((COALESCE(lr.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))::numeric, 1)::float AS rel_tilt_x,
-        ROUND((COALESCE(lr.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))::numeric, 1)::float AS rel_tilt_y,
-        ROUND(SQRT(
-          (COALESCE(lr.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
-          (COALESCE(lr.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
-        )::numeric, 1)::float AS relative_total_tilt,
-        (SQRT(
-          (COALESCE(lr.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
-          (COALESCE(lr.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
-        ) > 15) AS is_pole_tilted,
+        CASE WHEN lr.tilt_x IS NOT NULL THEN ROUND((lr.tilt_x - COALESCE(s.tilt_offset_x, 0))::numeric, 1)::float ELSE NULL END AS rel_tilt_x,
+        CASE WHEN lr.tilt_y IS NOT NULL THEN ROUND((lr.tilt_y - COALESCE(s.tilt_offset_y, 0))::numeric, 1)::float ELSE NULL END AS rel_tilt_y,
+        CASE WHEN lr.tilt_x IS NOT NULL OR lr.tilt_y IS NOT NULL THEN
+          ROUND(SQRT(
+            (COALESCE(lr.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
+            (COALESCE(lr.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
+          )::numeric, 1)::float
+        ELSE NULL END AS relative_total_tilt,
+        CASE WHEN lr.tilt_x IS NOT NULL OR lr.tilt_y IS NOT NULL THEN
+          (SQRT(
+            (COALESCE(lr.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
+            (COALESCE(lr.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
+          ) > 15)
+        ELSE false END AS is_pole_tilted,
         -- Derive status from calculated relative water_level vs thresholds (if configured)
         CASE
           WHEN lr.raw_distance IS NULL AND lr.water_level IS NULL THEN 'unknown'
@@ -90,12 +125,22 @@ router.get('/', async (req, res) => {
       LEFT JOIN LATERAL (
         SELECT * FROM readings r
         WHERE r.station_id = s.station_id
+          AND ($1::boolean = true OR s.manual_offline_at IS NULL OR r.timestamp <= s.manual_offline_at)
         ORDER BY r.timestamp DESC
         LIMIT 1
       ) lr ON true
+      LEFT JOIN LATERAL (
+        SELECT
+          COALESCE(ns_s.offline_timeout_enabled, ns_g.offline_timeout_enabled, true) AS offline_timeout_enabled,
+          COALESCE(ns_s.offline_timeout_minutes, ns_g.offline_timeout_minutes, 30) AS offline_timeout_minutes
+        FROM (SELECT 1) _dummy
+        LEFT JOIN notification_settings ns_s ON ns_s.station_id = s.station_id
+        LEFT JOIN notification_settings ns_g ON ns_g.station_id IS NULL
+        LIMIT 1
+      ) ns ON true
       ORDER BY s.install_date ASC NULLS LAST, s.station_id ASC
     `;
-    const result = await db.query(sql);
+    const result = await db.query(sql, [isStaffOrAdmin]);
     res.json({ success: true, data: result.rows, count: result.rowCount });
   } catch (err) {
     console.error('[API /stations] Error:', err.message);
@@ -142,44 +187,85 @@ router.get('/gateways', async (_req, res) => {
 
 // ── GET /api/stations/:stationId ──────────────────────────────────
 // Returns single station detail with last reading
-router.get('/:stationId', async (req, res) => {
+router.get('/:stationId', optionalAuthenticate, async (req, res) => {
   const { stationId } = req.params;
+  const isStaffOrAdmin = Boolean(req.user && (req.user.role === 'admin' || req.user.role === 'staff'));
+
   try {
     const sql = `
       SELECT
         s.*,
+        s.status AS manual_status,
+        s.manual_offline_at,
+        (s.status = 'offline' AND s.manual_offline_at IS NOT NULL) AS is_manual_offline,
+        CASE
+          WHEN s.status = 'maintenance' THEN 'maintenance'
+          WHEN s.status = 'offline' THEN 'offline'
+          WHEN COALESCE(ns.offline_timeout_enabled, true) AND GREATEST(lr.timestamp, s.status_updated_at) IS NOT NULL AND (EXTRACT(EPOCH FROM (NOW() - GREATEST(lr.timestamp, s.status_updated_at))) / 60) >= COALESCE(ns.offline_timeout_minutes, 30) THEN 'offline'
+          ELSE 'active'
+        END AS status,
+        CASE
+          WHEN s.status = 'maintenance' THEN 'maintenance'
+          WHEN s.status = 'offline' THEN 'offline'
+          ELSE 'active'
+        END AS operating_status,
+        CASE
+          WHEN s.status != 'active' THEN false
+          WHEN COALESCE(ns.offline_timeout_enabled, true) AND GREATEST(lr.timestamp, s.status_updated_at) IS NOT NULL AND (EXTRACT(EPOCH FROM (NOW() - GREATEST(lr.timestamp, s.status_updated_at))) / 60) >= COALESCE(ns.offline_timeout_minutes, 30) THEN false
+          ELSE true
+        END AS is_online,
+        COALESCE(ns.offline_timeout_enabled, true) AS offline_timeout_enabled,
+        COALESCE(ns.offline_timeout_minutes, 30)::integer AS offline_timeout_minutes,
+        CASE
+          WHEN lr.timestamp IS NOT NULL THEN
+            ROUND(EXTRACT(EPOCH FROM (NOW() - lr.timestamp)) / 60)::integer
+          ELSE NULL
+        END AS minutes_since_last_reading,
+        CASE
+          WHEN s.status_updated_at IS NOT NULL THEN
+            ROUND(EXTRACT(EPOCH FROM (NOW() - s.status_updated_at)) / 60)::integer
+          ELSE NULL
+        END AS minutes_since_status_update,
         COALESCE(NULLIF(TRIM(s.reference_point_name), ''), 'จุดอ้างอิง') AS reference_point_name,
         g.gateway_name,
         g.ip_address,
         g.status AS gateway_status,
-        m.mcu_id, m.model, m.firmware_version, m.signal_strength, m.battery_level,
+        s.dev_eui AS mcu_id,
+        s.dev_eui,
+        s.dev_euis,
+        s.payload_id,
+        s.model,
+        s.firmware_version,
+        lr.rssi AS signal_strength,
+        lr.battery_percent AS battery_level,
         lr.timestamp AS last_reading_time,
         lr.raw_distance,
         s.tilt_offset_x::float AS tilt_offset_x,
         s.tilt_offset_y::float AS tilt_offset_y,
-        COALESCE(
-          CASE
-            WHEN lr.raw_distance IS NOT NULL THEN
-              ROUND((s.sensor_to_ref_distance - lr.raw_distance)::numeric, 3)
-            ELSE lr.water_level
-          END,
-          0
-        ) AS water_level,
+        CASE
+          WHEN lr.raw_distance IS NOT NULL THEN
+            ROUND((s.sensor_to_ref_distance - lr.raw_distance)::numeric, 3)
+          ELSE lr.water_level
+        END AS water_level,
         lr.is_blind_zone,
         lr.temperature, lr.humidity,
         lr.battery_voltage, lr.battery_percent,
         lr.rssi, lr.snr, lr.tilt_x, lr.tilt_y,
         lr.latitude AS reading_lat, lr.longitude AS reading_lng,
-        ROUND((COALESCE(lr.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))::numeric, 1)::float AS rel_tilt_x,
-        ROUND((COALESCE(lr.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))::numeric, 1)::float AS rel_tilt_y,
-        ROUND(SQRT(
-          (COALESCE(lr.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
-          (COALESCE(lr.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
-        )::numeric, 1)::float AS relative_total_tilt,
-        (SQRT(
-          (COALESCE(lr.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
-          (COALESCE(lr.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
-        ) > 15) AS is_pole_tilted,
+        CASE WHEN lr.tilt_x IS NOT NULL THEN ROUND((lr.tilt_x - COALESCE(s.tilt_offset_x, 0))::numeric, 1)::float ELSE NULL END AS rel_tilt_x,
+        CASE WHEN lr.tilt_y IS NOT NULL THEN ROUND((lr.tilt_y - COALESCE(s.tilt_offset_y, 0))::numeric, 1)::float ELSE NULL END AS rel_tilt_y,
+        CASE WHEN lr.tilt_x IS NOT NULL OR lr.tilt_y IS NOT NULL THEN
+          ROUND(SQRT(
+            (COALESCE(lr.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
+            (COALESCE(lr.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
+          )::numeric, 1)::float
+        ELSE NULL END AS relative_total_tilt,
+        CASE WHEN lr.tilt_x IS NOT NULL OR lr.tilt_y IS NOT NULL THEN
+          (SQRT(
+            (COALESCE(lr.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
+            (COALESCE(lr.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
+          ) > 15)
+        ELSE false END AS is_pole_tilted,
         CASE
           WHEN lr.raw_distance IS NULL AND lr.water_level IS NULL THEN 'unknown'
           WHEN s.critical_level IS NOT NULL AND (
@@ -206,16 +292,25 @@ router.get('/:stationId', async (req, res) => {
         END AS water_status
       FROM station s
       JOIN gateway g ON g.gateway_id = s.gateway_id
-      LEFT JOIN mcu m ON m.station_id = s.station_id
       LEFT JOIN LATERAL (
         SELECT * FROM readings r
         WHERE r.station_id = s.station_id
+          AND ($2::boolean = true OR s.manual_offline_at IS NULL OR r.timestamp <= s.manual_offline_at)
         ORDER BY r.timestamp DESC
         LIMIT 1
       ) lr ON true
+      LEFT JOIN LATERAL (
+        SELECT
+          COALESCE(ns_s.offline_timeout_enabled, ns_g.offline_timeout_enabled, true) AS offline_timeout_enabled,
+          COALESCE(ns_s.offline_timeout_minutes, ns_g.offline_timeout_minutes, 30) AS offline_timeout_minutes
+        FROM (SELECT 1) _dummy
+        LEFT JOIN notification_settings ns_s ON ns_s.station_id = s.station_id
+        LEFT JOIN notification_settings ns_g ON ns_g.station_id IS NULL
+        LIMIT 1
+      ) ns ON true
       WHERE s.station_id = $1
     `;
-    const result = await db.query(sql, [stationId]);
+    const result = await db.query(sql, [stationId, isStaffOrAdmin]);
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'Station not found' });
     }
@@ -245,7 +340,15 @@ router.patch('/:stationId/status', authenticateToken, requireRole(['admin', 'sta
 
   try {
     const result = await db.query(
-      `UPDATE station SET status = $1 WHERE station_id = $2 RETURNING station_id, station_name, status`,
+      `UPDATE station
+       SET status = $1::"StationStatus",
+           status_updated_at = NOW(),
+           manual_offline_at = CASE
+             WHEN $1::text = 'offline' THEN COALESCE(manual_offline_at, NOW())
+             ELSE NULL
+           END
+       WHERE station_id = $2
+       RETURNING station_id, station_name, status, status_updated_at, manual_offline_at, (status = 'offline' AND manual_offline_at IS NOT NULL) AS is_manual_offline`,
       [dbStatus, stationId]
     );
 
@@ -253,11 +356,11 @@ router.patch('/:stationId/status', authenticateToken, requireRole(['admin', 'sta
       return res.status(404).json({ success: false, error: 'Station not found' });
     }
 
-    console.log(`[API /stations] Station ${stationId} status -> '${dbStatus}'`);
+    console.log(`[API /stations] Station ${stationId} status -> '${dbStatus}' (manual_offline_at: ${result.rows[0].manual_offline_at})`);
     res.json({
       success: true,
       data: result.rows[0],
-      message: dbStatus === 'active' ? 'เปิดให้บริการสถานีเรียบร้อยแล้ว' : 'ปรับสถานะสถานีเป็นออฟไลน์เรียบร้อยแล้ว',
+      message: dbStatus === 'active' ? 'เปิดให้บริการสถานีเรียบร้อยแล้ว' : 'ปรับสถานะสถานีเป็นออฟไลน์เรียบร้อยแล้ว (โหมดทดสอบ: ค่าสดเฉพาะเจ้าหน้าที่)',
     });
   } catch (err) {
     console.error(`[API /stations/${stationId}/status] Error:`, err.message);
@@ -280,7 +383,10 @@ router.put('/:stationId/calibration', authenticateToken, requireRole(['admin', '
     tilt_offset_y,
   } = req.body;
 
+  const client = await db.getClient();
   try {
+    await client.query('BEGIN');
+
     const refName = reference_point_name && reference_point_name.trim() !== ''
       ? reference_point_name.trim()
       : 'จุดอ้างอิง';
@@ -312,8 +418,9 @@ router.put('/:stationId/calibration', authenticateToken, requireRole(['admin', '
       stationId,
     ];
 
-    const result = await db.query(sql, values);
+    const result = await client.query(sql, values);
     if (result.rowCount === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ success: false, error: 'Station not found' });
     }
 
@@ -323,11 +430,12 @@ router.put('/:stationId/calibration', authenticateToken, requireRole(['admin', '
 
     let recalculatedCount = 0;
     try {
-      recalculatedCount = await recalculateStationReadings(stationId, newSensorToRef, false, blindZone);
+      recalculatedCount = await recalculateStationReadings(stationId, newSensorToRef, false, blindZone, client);
     } catch (recalcErr) {
       console.warn(`[API /stations/${stationId}/calibration] Recalculate warning:`, recalcErr.message);
     }
 
+    await client.query('COMMIT');
     console.log(`[API /stations] Station ${stationId} calibrated: D_ref=${newSensorToRef}m, Recalculated=${recalculatedCount} readings`);
     res.json({
       success: true,
@@ -336,8 +444,11 @@ router.put('/:stationId/calibration', authenticateToken, requireRole(['admin', '
       message: 'บันทึกการตั้งค่าจุดอ้างอิงและคำนวณค่าระดับน้ำทั้งหมดสำเร็จ',
     });
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error(`[API /stations/${stationId}/calibration] Error:`, err.message);
     res.status(500).json({ success: false, error: 'Failed to update calibration' });
+  } finally {
+    client.release();
   }
 });
 
@@ -377,7 +488,16 @@ router.put('/:stationId', authenticateToken, requireRole(['admin', 'staff']), as
         location_name             = COALESCE($3, location_name),
         latitude                  = COALESCE($4, latitude),
         longitude                 = COALESCE($5, longitude),
-        status                    = COALESCE($6, status),
+        status                    = COALESCE($6::"StationStatus", status),
+        status_updated_at         = CASE
+          WHEN $6 IS NOT NULL AND $6::"StationStatus" != status THEN NOW()
+          ELSE status_updated_at
+        END,
+        manual_offline_at         = CASE
+          WHEN $6::text = 'offline' THEN COALESCE(manual_offline_at, NOW())
+          WHEN $6 IS NOT NULL AND $6::text != 'offline' THEN NULL
+          ELSE manual_offline_at
+        END,
         sensor_to_ref_distance    = COALESCE($7, sensor_to_ref_distance),
         reference_point_name      = $8,
         warning_level             = $9,
@@ -560,11 +680,11 @@ router.delete('/:stationId', authenticateToken, requireRole(['admin']), async (r
     }
     const stationName = checkRes.rows[0].station_name;
 
-    // 2. Clean up notification settings and line subscriber preferences for this station
+    // 2. Clean up notification settings and user preferences for this station
     await db.query('DELETE FROM notification_settings WHERE station_id = $1', [stationId]);
-    await db.query('UPDATE line_subscribers SET station_ids = array_remove(station_ids, $1) WHERE $1 = ANY(station_ids)', [stationId]);
+    await db.query('UPDATE users SET station_ids = array_remove(station_ids, $1) WHERE $1 = ANY(station_ids)', [stationId]);
 
-    // 3. Delete station (cascades to readings, alerts, mcu, station_mapping)
+    // 3. Delete station (cascades to readings, alerts, notification_settings)
     await db.query('DELETE FROM station WHERE station_id = $1', [stationId]);
 
     console.log(`[API DELETE /stations/${stationId}] Station "${stationName}" (${stationId}) deleted successfully`);

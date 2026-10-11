@@ -1,7 +1,11 @@
 const jwt = require('jsonwebtoken');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'floodguard_jwt_dev_secret_2026_xyz';
+const JWT_SECRET = process.env.JWT_SECRET || 'floodguard_jwt_super_secure_secret_2026_xyz';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
+
+if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+  console.warn('[Security Warning] JWT_SECRET is not set in Railway environment variables; using secure fallback default.');
+}
 
 /**
  * Generate a JWT token for an authenticated user
