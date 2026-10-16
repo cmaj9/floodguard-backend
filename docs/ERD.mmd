@@ -1,0 +1,114 @@
+erDiagram
+    gateway ||--o{ station : "connects"
+    station ||--o{ readings : "records"
+    station ||--o{ alerts : "triggers"
+    station |o--o| notification_settings : "overrides"
+    users }o..o{ station : "station_ids (logical)"
+
+    gateway {
+        VARCHAR(20) gateway_id PK
+        VARCHAR(100) gateway_name
+        VARCHAR(50) ip_address
+        TIMESTAMPTZ last_update
+        ENUM status
+        VARCHAR(64) chirpstack_id UK
+        TEXT[] chirpstack_ids
+    }
+
+    station {
+        VARCHAR(20) station_id PK
+        VARCHAR(20) gateway_id FK
+        VARCHAR(100) station_name
+        ENUM station_type
+        VARCHAR(150) location_name
+        NUMERIC latitude
+        NUMERIC longitude
+        DATE install_date
+        ENUM status
+        FLOAT warning_level
+        FLOAT critical_level
+        FLOAT max_level
+        FLOAT normal_max
+        FLOAT sensor_to_ref_distance
+        VARCHAR(100) reference_point_name
+        FLOAT blind_zone_offset
+        BOOLEAN tilt_compensation_enabled
+        NUMERIC tilt_offset_x
+        NUMERIC tilt_offset_y
+        TIMESTAMPTZ manual_offline_at
+        TIMESTAMPTZ status_updated_at
+        VARCHAR(64) dev_eui UK
+        TEXT[] dev_euis
+        INTEGER payload_id UK
+        VARCHAR(100) model
+        VARCHAR(50) firmware_version
+    }
+
+    readings {
+        BIGINT reading_id PK
+        VARCHAR(20) station_id FK
+        TIMESTAMPTZ timestamp
+        NUMERIC water_level
+        FLOAT temperature
+        FLOAT humidity
+        FLOAT battery_voltage
+        FLOAT battery_percent
+        FLOAT rssi
+        FLOAT snr
+        FLOAT tilt_x
+        FLOAT tilt_y
+        NUMERIC latitude
+        NUMERIC longitude
+        NUMERIC raw_distance
+        BOOLEAN is_blind_zone
+    }
+
+    alerts {
+        VARCHAR(20) alert_id PK
+        VARCHAR(20) station_id FK
+        TIMESTAMPTZ timestamp
+        ENUM alert_type
+        FLOAT value
+        FLOAT threshold
+        VARCHAR(255) message
+        ENUM status
+    }
+
+    notification_settings {
+        INTEGER setting_id PK
+        VARCHAR(50) station_id FK,UK
+        BOOLEAN water_level_enabled
+        FLOAT safety_offset
+        INTEGER water_level_cooldown_minutes
+        BOOLEAN rate_of_rise_enabled
+        FLOAT rate_of_rise_threshold
+        INTEGER rate_of_rise_cooldown_minutes
+        BOOLEAN offline_timeout_enabled
+        INTEGER offline_timeout_minutes
+        INTEGER offline_cooldown_minutes
+        BOOLEAN battery_low_enabled
+        FLOAT battery_low_threshold
+        INTEGER battery_low_cooldown_minutes
+        BOOLEAN geofence_enabled
+        FLOAT geofence_radius_meters
+        INTEGER geofence_cooldown_minutes
+        TIMESTAMPTZ created_at
+        TIMESTAMPTZ updated_at
+    }
+
+    users {
+        INTEGER user_id PK
+        VARCHAR(100) name
+        VARCHAR(150) email UK
+        VARCHAR(255) password_hash
+        VARCHAR(20) phone
+        ENUM role
+        VARCHAR(100) district
+        VARCHAR(100) line_user_id
+        TEXT[] station_ids
+        BOOLEAN is_active
+        BOOLEAN is_credentials_set
+        TEXT picture_url
+        TIMESTAMPTZ created_at
+        TIMESTAMPTZ updated_at
+    }

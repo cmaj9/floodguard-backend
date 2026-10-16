@@ -1,0 +1,171 @@
+// DBML (Database Markup Language) for https://dbdiagram.io/
+// FloodGuard Telemetry & Early Warning System Database Schema
+
+// ==========================================
+// ENUMS
+// ==========================================
+
+Enum GatewayStatus {
+  online
+  offline
+  maintenance
+}
+
+Enum StationType {
+  river
+  canal
+  reservoir
+  urban
+}
+
+Enum StationStatus {
+  active
+  inactive
+  maintenance
+  offline
+}
+
+Enum AlertType {
+  water_level
+  battery
+  battery_low
+  offline
+  online
+  tilt
+  rate_of_rise
+  geofence
+  sensor_drift
+}
+
+Enum AlertStatus {
+  active
+  acknowledged
+  resolved
+}
+
+Enum UserRole {
+  citizen
+  staff
+  admin
+}
+
+// ==========================================
+// TABLES
+// ==========================================
+
+Table gateway {
+  gateway_id varchar(20) [pk, not null, note: 'รหัส Gateway']
+  gateway_name varchar(100) [note: 'ชื่อ Gateway']
+  ip_address varchar(50) [note: 'IP address']
+  last_update timestamptz [note: 'เวลาส่งข้อมูลล่าสุด']
+  status GatewayStatus [default: 'offline', note: 'สถานะเกตเวย์']
+  chirpstack_id varchar(64) [unique, note: 'ChirpStack Gateway ID (Hex 16)']
+  chirpstack_ids "text[]" [default: '{}', note: 'รายการ Hex IDs ทั้งหมด']
+}
+
+Table station {
+  station_id varchar(20) [pk, not null, note: 'รหัสสถานี']
+  gateway_id varchar(20) [not null, note: 'Gateway ที่เชื่อมต่อ']
+  station_name varchar(100) [note: 'ชื่อสถานี']
+  station_type StationType [default: 'river', note: 'ประเภทแหล่งน้ำ']
+  location_name varchar(150) [note: 'สถานที่ติดตั้ง']
+  latitude numeric(10,6) [note: 'พิกัดละติจูด']
+  longitude numeric(10,6) [note: 'พิกัดลองจิจูด']
+  install_date date [note: 'วันที่ติดตั้ง']
+  status StationStatus [default: 'active', note: 'สถานะสถานี']
+  warning_level float [note: 'ระดับน้ำเฝ้าระวัง (ม.)']
+  critical_level float [note: 'ระดับน้ำวิกฤต (ม.)']
+  max_level float [note: 'ระดับน้ำสูงสุด (ม.)']
+  normal_max float [note: 'ระดับน้ำปกติสูงสุด (ม.)']
+  sensor_to_ref_distance float [default: 2.0, note: 'ระยะเซนเซอร์ถึงจุดอ้างอิง (ม.)']
+  reference_point_name varchar(100) [default: 'จุดอ้างอิง', note: 'ชื่อจุดอ้างอิง เช่น ขอบตลิ่ง']
+  blind_zone_offset float [default: 0.28, note: 'ระยะบอดเซนเซอร์ (ม.)']
+  tilt_compensation_enabled boolean [default: true, note: 'ชดเชยการเอียง']
+  tilt_offset_x numeric(5,2) [default: 0.0, note: 'Offset เอียงแกน X']
+  tilt_offset_y numeric(5,2) [default: 0.0, note: 'Offset เอียงแกน Y']
+  manual_offline_at timestamptz [note: 'เวลาที่ตั้งออฟไลน์ด้วยตนเอง']
+  status_updated_at timestamptz [default: `now()`, note: 'เวลาที่สถานะเปลี่ยนล่าสุด']
+  dev_eui varchar(64) [unique, note: 'DevEUI หลักของอุปกรณ์']
+  dev_euis "text[]" [default: '{}', note: 'รายการ DevEUI ทั้งหมด']
+  payload_id integer [unique, note: 'หมายเลขสถานีตัวเลขจาก Payload']
+  model varchar(100) [default: 'Heltec-WiFi-LoRa-32(V3)', note: 'รุ่น MCU']
+  firmware_version varchar(50) [default: 'v1.2.0', note: 'เวอร์ชันเฟิร์มแวร์']
+}
+
+Table readings {
+  reading_id bigint [pk, increment, not null, note: 'รหัสลำดับการอ่านค่า']
+  station_id varchar(20) [not null, note: 'สถานีต้นทาง']
+  timestamp timestamptz [not null, default: `now()`, note: 'เวลาที่อ่านค่า']
+  water_level numeric(6,3) [note: 'ระดับน้ำเทียบจุดอ้างอิง (ม.)']
+  temperature float [note: 'อุณหภูมิ (°C)']
+  humidity float [note: 'ความชื้นสัมพัทธ์ (%)']
+  battery_voltage float [note: 'แรงดันแบตเตอรี่ (V)']
+  battery_percent float [note: 'ระดับแบตเตอรี่ (%)']
+  rssi float [note: 'ความแรงสัญญาณ RSSI (dBm)']
+  snr float [note: 'Signal-to-Noise Ratio (dB)']
+  tilt_x float [note: 'มุมเอียงแกน X (องศา)']
+  tilt_y float [note: 'มุมเอียงแกน Y (องศา)']
+  latitude numeric(10,6) [note: 'พิกัดละติจูด GPS']
+  longitude numeric(10,6) [note: 'พิกัดลองจิจูด GPS']
+  raw_distance numeric(6,3) [note: 'ระยะดิบเซนเซอร์ถึงผิวน้ำ (ม.)']
+  is_blind_zone boolean [default: false, note: 'แตะระยะบอดหรือไม่']
+}
+
+Table alerts {
+  alert_id varchar(20) [pk, not null, note: 'รหัสแจ้งเตือน AL-XXXXXX']
+  station_id varchar(20) [not null, note: 'สถานีที่เกิดเหตุ']
+  timestamp timestamptz [not null, default: `now()`, note: 'เวลาเกิดเหตุ']
+  alert_type AlertType [note: 'ประเภทการแจ้งเตือน']
+  value float [note: 'ค่าที่ทำให้เกิด alert']
+  threshold float [note: 'เกณฑ์ที่ตั้งไว้']
+  message varchar(255) [note: 'ข้อความแจ้งเตือน']
+  status AlertStatus [default: 'active', note: 'สถานะการจัดการ']
+}
+
+Table notification_settings {
+  setting_id integer [pk, increment, not null, note: 'รหัสการตั้งค่า']
+  station_id varchar(50) [unique, note: 'รหัสสถานี (NULL = ค่ากลาง Global)']
+  water_level_enabled boolean [default: true, note: 'เปิด/ปิดแจ้งเตือนระดับน้ำ']
+  safety_offset float [default: 0.0, note: 'ระยะปลอดภัยชดเชย (ม.)']
+  rate_of_rise_enabled boolean [default: true, note: 'เปิด/ปิดแจ้งเตือนน้ำขึ้นเร็ว']
+  rate_of_rise_threshold float [default: 0.30, note: 'เกณฑ์น้ำขึ้นเร็ว (ม./ชม.)']
+  offline_timeout_enabled boolean [default: true, note: 'เปิด/ปิดแจ้งเตือนออฟไลน์']
+  offline_timeout_minutes integer [default: 30, note: 'เวลาที่ถือว่าออฟไลน์ (นาที)']
+  battery_low_enabled boolean [default: true, note: 'เปิด/ปิดแจ้งเตือนแบตต่ำ']
+  battery_low_threshold float [default: 20.0, note: 'เกณฑ์แบตเตอรี่ต่ำ (%)']
+  geofence_enabled boolean [default: true, note: 'เปิด/ปิดแจ้งเตือนหลุดพิกัด']
+  geofence_radius_meters float [default: 100.0, note: 'รัศมีปลอดภัย (ม.)']
+  created_at timestamptz [default: `now()`]
+  updated_at timestamptz [default: `now()`]
+  water_level_cooldown_minutes integer [default: 30, note: 'Cooldown ระดับน้ำ (นาที)']
+  rate_of_rise_cooldown_minutes integer [default: 30, note: 'Cooldown น้ำขึ้นเร็ว (นาที)']
+  offline_cooldown_minutes integer [default: 60, note: 'Cooldown ออฟไลน์ (นาที)']
+  battery_low_cooldown_minutes integer [default: 120, note: 'Cooldown แบตเตอรี่ต่ำ (นาที)']
+  geofence_cooldown_minutes integer [default: 60, note: 'Cooldown หลุดพิกัด (นาที)']
+}
+
+Table users {
+  user_id integer [pk, increment, not null, note: 'รหัสผู้ใช้งาน']
+  name varchar(100) [not null, note: 'ชื่อ-นามสกุล']
+  email varchar(150) [unique, not null, note: 'อีเมลเข้าสู่ระบบ']
+  password_hash varchar(255) [not null, note: 'รหัสผ่าน bcrypt']
+  phone varchar(20) [note: 'เบอร์โทรศัพท์']
+  role UserRole [not null, default: 'citizen', note: 'สิทธิ์การใช้งาน RBAC']
+  district varchar(100) [note: 'อำเภอ/เขตที่สังกัด']
+  line_user_id varchar(100) [note: 'LINE User ID แจ้งเตือนรายบุคคล']
+  station_ids "text[]" [not null, default: '{}', note: 'รายการสถานีที่รับผิดชอบ/ติดตาม']
+  is_active boolean [not null, default: true, note: 'สถานะบัญชี']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  is_credentials_set boolean [not null, default: false, note: 'ตั้งรหัสผ่านเองแล้วหรือไม่']
+  picture_url text [note: 'URL รูปโปรไฟล์ LINE']
+}
+
+// ==========================================
+// RELATIONSHIPS (FOREIGN KEYS)
+// ==========================================
+
+Ref: station.gateway_id > gateway.gateway_id [delete: restrict]
+Ref: readings.station_id > station.station_id [delete: cascade]
+Ref: alerts.station_id > station.station_id [delete: cascade]
+Ref: notification_settings.station_id - station.station_id [delete: cascade]
