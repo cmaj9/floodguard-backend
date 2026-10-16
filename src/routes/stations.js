@@ -3,13 +3,32 @@ const router = express.Router();
 const db = require('../config/database');
 const { recalculateStationReadings } = require('../services/readingService');
 const { evaluateStationAlertsNow } = require('../services/alertService');
-const { authenticateToken, optionalAuthenticate, requireRole } = require('../middleware/auth');
+const chirpstackService = require('../services/chirpstackService');
+const {
+  authenticateToken,
+  optionalAuthenticate,
+  requireRole,
+  getEffectiveUserStationIds,
+  requireStationAccess,
+} = require('../middleware/auth');
 
 // ── GET /api/stations ─────────────────────────────────────────────
 // Returns all stations with their latest reading joined
 router.get('/', optionalAuthenticate, async (req, res) => {
   try {
     const isStaffOrAdmin = Boolean(req.user && (req.user.role === 'admin' || req.user.role === 'staff'));
+    let staffFilterClause = '';
+    const queryParams = [isStaffOrAdmin];
+
+    // Role-based scope: If caller is staff, restrict strictly to their assigned stations
+    if (req.user && req.user.role === 'staff') {
+      const staffStationIds = await getEffectiveUserStationIds(req.user.id);
+      if (!staffStationIds || staffStationIds.length === 0) {
+        return res.json({ success: true, data: [], count: 0 });
+      }
+      queryParams.push(staffStationIds);
+      staffFilterClause = `WHERE s.station_id = ANY($${queryParams.length})`;
+    }
 
     const sql = `
       SELECT
@@ -145,9 +164,10 @@ router.get('/', optionalAuthenticate, async (req, res) => {
         LEFT JOIN notification_settings ns_g ON ns_g.station_id IS NULL
         LIMIT 1
       ) ns ON true
+      ${staffFilterClause}
       ORDER BY s.install_date ASC NULLS LAST, s.station_id ASC
     `;
-    const result = await db.query(sql, [isStaffOrAdmin]);
+    const result = await db.query(sql, queryParams);
     res.json({ success: true, data: result.rows, count: result.rowCount });
   } catch (err) {
     console.error('[API /stations] Error:', err.message);
@@ -192,11 +212,35 @@ router.get('/gateways', async (_req, res) => {
   }
 });
 
+// ── GET /api/stations/chirpstack-check/:devEui ────────────────────
+// Verifies whether a DevEUI exists on ChirpStack and returns device info
+router.get('/chirpstack-check/:devEui', optionalAuthenticate, async (req, res) => {
+  try {
+    const { devEui } = req.params;
+    const result = await chirpstackService.verifyDevice(devEui);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    console.error('[API GET /stations/chirpstack-check] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Failed to verify device with ChirpStack' });
+  }
+});
+
 // ── GET /api/stations/:stationId ──────────────────────────────────
 // Returns single station detail with last reading
 router.get('/:stationId', optionalAuthenticate, async (req, res) => {
   const { stationId } = req.params;
   const isStaffOrAdmin = Boolean(req.user && (req.user.role === 'admin' || req.user.role === 'staff'));
+
+  // Restrict staff to assigned stations only
+  if (req.user && req.user.role === 'staff') {
+    const staffStationIds = await getEffectiveUserStationIds(req.user.id);
+    if (!staffStationIds || !staffStationIds.includes(stationId)) {
+      return res.status(403).json({
+        success: false,
+        error: `คุณไม่มีสิทธิ์เข้าถึงข้อมูลสถานี ${stationId} (อยู่นอกเหนือสถานีที่ได้รับมอบหมาย)`,
+      });
+    }
+  }
 
   try {
     const sql = `
@@ -329,8 +373,8 @@ router.get('/:stationId', optionalAuthenticate, async (req, res) => {
 });
 
 // ── PATCH /api/stations/:stationId/status ─────────────────────────
-// Quick toggle station status ('active' / 'offline' / 'maintenance') - Staff & Admin
-router.patch('/:stationId/status', authenticateToken, requireRole(['admin', 'staff']), async (req, res) => {
+// Quick toggle station status ('active' / 'offline' / 'maintenance') - Staff & Admin (Staff restricted to assigned stations)
+router.patch('/:stationId/status', authenticateToken, requireRole(['admin', 'staff']), requireStationAccess('params', 'stationId'), async (req, res) => {
   const { stationId } = req.params;
   const { status } = req.body;
 
@@ -376,8 +420,8 @@ router.patch('/:stationId/status', authenticateToken, requireRole(['admin', 'sta
 });
 
 // ── PUT /api/stations/:stationId/calibration ──────────────────────
-// Update calibration and reference point parameters for a station - Staff & Admin
-router.put('/:stationId/calibration', authenticateToken, requireRole(['admin', 'staff']), async (req, res) => {
+// Update calibration and reference point parameters for a station - Staff & Admin (Staff restricted to assigned stations)
+router.put('/:stationId/calibration', authenticateToken, requireRole(['admin', 'staff']), requireStationAccess('params', 'stationId'), async (req, res) => {
   const { stationId } = req.params;
   const {
     sensor_to_ref_distance,
@@ -470,8 +514,8 @@ router.put('/:stationId/calibration', authenticateToken, requireRole(['admin', '
 });
 
 // ── PUT /api/stations/:stationId ──────────────────────────────────
-// Update full station data including metadata and calibration - Staff & Admin
-router.put('/:stationId', authenticateToken, requireRole(['admin', 'staff']), async (req, res) => {
+// Update full station data including metadata and calibration - Staff & Admin (Staff restricted to assigned stations)
+router.put('/:stationId', authenticateToken, requireRole(['admin', 'staff']), requireStationAccess('params', 'stationId'), async (req, res) => {
   const { stationId } = req.params;
   const {
     station_name,
@@ -628,8 +672,8 @@ router.put('/:stationId', authenticateToken, requireRole(['admin', 'staff']), as
 });
 
 // ── POST /api/stations ─────────────────────────────────────────────
-// Create new station with duplicate check and gateway validation - Staff & Admin
-router.post('/', authenticateToken, requireRole(['admin', 'staff']), async (req, res) => {
+// Create new station with duplicate check and gateway validation - Admin only
+router.post('/', authenticateToken, requireRole(['admin']), async (req, res) => {
   const {
     station_id,
     gateway_id,

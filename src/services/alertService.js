@@ -634,7 +634,7 @@ async function checkOfflineStations() {
 /**
  * Get all alerts with station details
  */
-async function getAlerts({ limit = 50, offset = 0, stationId = null, status = null } = {}) {
+async function getAlerts({ limit = 50, offset = 0, stationId = null, status = null, stationIds = null } = {}) {
   let queryText = `
     SELECT
       a.alert_id,
@@ -656,6 +656,10 @@ async function getAlerts({ limit = 50, offset = 0, stationId = null, status = nu
   if (stationId) {
     params.push(stationId);
     queryText += ` AND a.station_id = $${params.length}`;
+  } else if (Array.isArray(stationIds)) {
+    if (stationIds.length === 0) return [];
+    params.push(stationIds);
+    queryText += ` AND a.station_id = ANY($${params.length})`;
   }
 
   if (status) {
@@ -678,17 +682,21 @@ async function getAlerts({ limit = 50, offset = 0, stationId = null, status = nu
 /**
  * Acknowledge an alert
  */
-async function acknowledgeAlert(alertId) {
-  const res = await db.query(
-    `UPDATE alerts
-     SET status = 'acknowledged'
-     WHERE alert_id = $1
-     RETURNING alert_id, station_id, alert_type, status, message`,
-    [alertId]
-  );
+async function acknowledgeAlert(alertId, allowedStationIds = null) {
+  let queryText = `UPDATE alerts SET status = 'acknowledged' WHERE alert_id = $1`;
+  const params = [alertId];
+
+  if (Array.isArray(allowedStationIds)) {
+    params.push(allowedStationIds);
+    queryText += ` AND station_id = ANY($${params.length})`;
+  }
+
+  queryText += ` RETURNING alert_id, station_id, alert_type, status, message`;
+
+  const res = await db.query(queryText, params);
 
   if (res.rows.length === 0) {
-    throw new Error('ไม่พบการแจ้งเตือนนี้');
+    throw new Error('ไม่พบการแจ้งเตือนนี้ หรือคุณไม่มีสิทธิ์จัดการการแจ้งเตือนของสถานีนี้');
   }
   return res.rows[0];
 }

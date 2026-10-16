@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { optionalAuthenticate } = require('../middleware/auth');
+const { optionalAuthenticate, getEffectiveUserStationIds } = require('../middleware/auth');
 const {
   processUplinkMessage,
   getLatestReadingsPerStation,
@@ -46,7 +46,17 @@ router.post(['/webhook', '/chirpstack'], async (req, res) => {
 router.get('/', optionalAuthenticate, async (req, res) => {
   try {
     const isStaffOrAdmin = Boolean(req.user && (req.user.role === 'admin' || req.user.role === 'staff'));
-    const readings = await getLatestReadingsPerStation(isStaffOrAdmin);
+    let readings = await getLatestReadingsPerStation(isStaffOrAdmin);
+
+    // If staff, filter strictly to assigned stations
+    if (req.user && req.user.role === 'staff') {
+      const staffStationIds = await getEffectiveUserStationIds(req.user.id);
+      if (!staffStationIds || staffStationIds.length === 0) {
+        return res.json({ success: true, data: [], count: 0 });
+      }
+      readings = readings.filter((r) => staffStationIds.includes(r.station_id));
+    }
+
     res.json({ success: true, data: readings, count: readings.length });
   } catch (err) {
     console.error('[API /readings] Error:', err.message);
@@ -67,6 +77,32 @@ router.get('/history', optionalAuthenticate, async (req, res) => {
   const conditions = [];
   const values = [];
   let idx = 1;
+
+  // Restrict staff to assigned stations only
+  if (req.user && req.user.role === 'staff') {
+    const staffStationIds = await getEffectiveUserStationIds(req.user.id);
+    if (!staffStationIds || staffStationIds.length === 0) {
+      return res.json({
+        success: true,
+        data: [],
+        count: 0,
+        total: 0,
+        limit,
+        offset,
+      });
+    }
+    if (stationId) {
+      if (!staffStationIds.includes(stationId)) {
+        return res.status(403).json({
+          success: false,
+          error: `คุณไม่มีสิทธิ์เข้าถึงข้อมูลสถานี ${stationId} (อยู่นอกเหนือสถานีที่ได้รับมอบหมาย)`,
+        });
+      }
+    } else {
+      conditions.push(`r.station_id = ANY($${idx++})`);
+      values.push(staffStationIds);
+    }
+  }
 
   if (stationId) {
     conditions.push(`r.station_id = $${idx++}`);
@@ -93,65 +129,126 @@ router.get('/history', optionalAuthenticate, async (req, res) => {
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const outerConditions = conditions.map(c => c.replace(/\br\./g, 'b.').replace(/\bs\./g, 'b.'));
+  const outerWhereClause = outerConditions.length > 0 ? `WHERE ${outerConditions.join(' AND ')}` : '';
 
   const sql = `
+    WITH base_readings AS (
+      SELECT
+        r.reading_id,
+        r.station_id,
+        s.station_name,
+        s.location_name,
+        s.sensor_to_ref_distance,
+        s.reference_point_name,
+        s.warning_level,
+        s.critical_level,
+        r.timestamp,
+        r.raw_distance,
+        COALESCE(
+          r.water_level,
+          CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+        ) AS water_level,
+        LAG(
+          COALESCE(
+            r.water_level,
+            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+          )
+        ) OVER (PARTITION BY r.station_id ORDER BY r.timestamp ASC) AS prev_water_level,
+        LAG(r.timestamp) OVER (PARTITION BY r.station_id ORDER BY r.timestamp ASC) AS prev_timestamp,
+        r.is_blind_zone,
+        r.temperature,
+        r.humidity,
+        r.battery_voltage,
+        r.battery_percent,
+        r.rssi,
+        r.snr,
+        r.tilt_x,
+        r.tilt_y,
+        s.tilt_offset_x::float AS tilt_offset_x,
+        s.tilt_offset_y::float AS tilt_offset_y,
+        ROUND((COALESCE(r.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))::numeric, 1)::float AS rel_tilt_x,
+        ROUND((COALESCE(r.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))::numeric, 1)::float AS rel_tilt_y,
+        ROUND(SQRT(
+          (COALESCE(r.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
+          (COALESCE(r.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
+        )::numeric, 1)::float AS relative_total_tilt,
+        (SQRT(
+          (COALESCE(r.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
+          (COALESCE(r.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
+        ) > 15) AS is_pole_tilted,
+        r.latitude,
+        r.longitude,
+        s.manual_offline_at
+      FROM readings r
+      JOIN station s ON s.station_id = r.station_id
+    )
     SELECT
-      r.reading_id,
-      r.station_id,
-      s.station_name,
-      s.location_name,
-      s.sensor_to_ref_distance,
-      s.reference_point_name,
-      s.warning_level,
-      s.critical_level,
-      r.timestamp,
-      r.raw_distance,
-      COALESCE(
-        r.water_level,
-        CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
-      ) AS water_level,
+      b.reading_id,
+      b.station_id,
+      b.station_name,
+      b.location_name,
+      b.sensor_to_ref_distance,
+      b.reference_point_name,
+      b.warning_level,
+      b.critical_level,
+      b.timestamp,
+      b.raw_distance,
+      b.water_level,
       CASE
-        WHEN s.critical_level IS NOT NULL AND (
-          COALESCE(
-            r.water_level,
-            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
-          ) >= s.critical_level
-        ) THEN 'critical'
-        WHEN s.warning_level IS NOT NULL AND (
-          COALESCE(
-            r.water_level,
-            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
-          ) >= s.warning_level
-        ) THEN 'warning'
+        WHEN b.critical_level IS NOT NULL AND b.water_level >= b.critical_level THEN 'critical'
+        WHEN b.warning_level IS NOT NULL AND b.water_level >= b.warning_level THEN 'warning'
         ELSE 'normal'
       END AS water_status,
-      r.is_blind_zone,
-      r.temperature,
-      r.humidity,
-      r.battery_voltage,
-      r.battery_percent,
-      r.rssi,
-      r.snr,
-      r.tilt_x,
-      r.tilt_y,
-      s.tilt_offset_x::float AS tilt_offset_x,
-      s.tilt_offset_y::float AS tilt_offset_y,
-      ROUND((COALESCE(r.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))::numeric, 1)::float AS rel_tilt_x,
-      ROUND((COALESCE(r.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))::numeric, 1)::float AS rel_tilt_y,
-      ROUND(SQRT(
-        (COALESCE(r.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
-        (COALESCE(r.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
-      )::numeric, 1)::float AS relative_total_tilt,
-      (SQRT(
-        (COALESCE(r.tilt_x, 0) - COALESCE(s.tilt_offset_x, 0))^2 +
-        (COALESCE(r.tilt_y, 0) - COALESCE(s.tilt_offset_y, 0))^2
-      ) > 15) AS is_pole_tilted,
-      r.latitude,
-      r.longitude
-    FROM readings r
-    JOIN station s ON s.station_id = r.station_id
-    ${whereClause}
-    ORDER BY r.timestamp DESC
+      b.prev_water_level,
+      b.prev_timestamp,
+      ROUND(
+        CASE
+          WHEN b.prev_water_level IS NOT NULL
+           AND EXTRACT(EPOCH FROM (b.timestamp - b.prev_timestamp)) > 180
+           AND EXTRACT(EPOCH FROM (b.timestamp - b.prev_timestamp)) <= 7200
+          THEN ((b.water_level - b.prev_water_level) / (EXTRACT(EPOCH FROM (b.timestamp - b.prev_timestamp)) / 3600.0))::numeric
+          ELSE NULL
+        END, 2
+      )::float AS rate_of_rise,
+      ROUND((EXTRACT(EPOCH FROM (b.timestamp - b.prev_timestamp)) / 60.0)::numeric, 0)::int AS time_diff_minutes,
+      (
+        CASE
+          WHEN b.prev_water_level IS NOT NULL
+           AND EXTRACT(EPOCH FROM (b.timestamp - b.prev_timestamp)) > 180
+           AND EXTRACT(EPOCH FROM (b.timestamp - b.prev_timestamp)) <= 7200
+           AND ((b.water_level - b.prev_water_level) / (EXTRACT(EPOCH FROM (b.timestamp - b.prev_timestamp)) / 3600.0)) >= 0.30
+          THEN true
+          ELSE false
+        END
+        OR EXISTS (
+          SELECT 1 FROM alerts a
+          WHERE a.station_id = b.station_id
+            AND a.alert_type = 'rate_of_rise'
+            AND a.timestamp >= b.timestamp - INTERVAL '2 minutes'
+            AND a.timestamp <= b.timestamp + INTERVAL '2 minutes'
+        )
+      ) AS is_rate_of_rise,
+      b.is_blind_zone,
+      b.temperature,
+      b.humidity,
+      b.battery_voltage,
+      b.battery_percent,
+      b.rssi,
+      b.snr,
+      b.tilt_x,
+      b.tilt_y,
+      b.tilt_offset_x,
+      b.tilt_offset_y,
+      b.rel_tilt_x,
+      b.rel_tilt_y,
+      b.relative_total_tilt,
+      b.is_pole_tilted,
+      b.latitude,
+      b.longitude
+    FROM base_readings b
+    ${outerWhereClause}
+    ORDER BY b.timestamp DESC
     LIMIT $${idx++} OFFSET $${idx++}
   `;
   values.push(limit, offset);
@@ -192,6 +289,20 @@ router.get('/export/csv', optionalAuthenticate, async (req, res) => {
   const { stationId, start, end, timeRange, range } = req.query;
   const selectedRange = timeRange || range;
 
+  // Restrict staff export to assigned stations
+  if (req.user && req.user.role === 'staff') {
+    const staffStationIds = await getEffectiveUserStationIds(req.user.id);
+    if (!staffStationIds || staffStationIds.length === 0) {
+      return res.status(403).json({ success: false, error: 'คุณยังไม่มีสถานีที่ได้รับมอบหมายสำหรับการส่งออกข้อมูล' });
+    }
+    if (stationId && !staffStationIds.includes(stationId)) {
+      return res.status(403).json({
+        success: false,
+        error: `คุณไม่มีสิทธิ์ส่งออกข้อมูลของสถานี ${stationId}`,
+      });
+    }
+  }
+
   try {
     const csvData = await exportReadingsToCSV({
       stationId,
@@ -225,6 +336,17 @@ router.get('/:stationId', optionalAuthenticate, async (req, res) => {
   const limit  = Math.min(parseInt(req.query.limit  ?? '100'), 1000);
   const offset = parseInt(req.query.offset ?? '0');
 
+  // Restrict staff
+  if (req.user && req.user.role === 'staff') {
+    const staffStationIds = await getEffectiveUserStationIds(req.user.id);
+    if (!staffStationIds || !staffStationIds.includes(stationId)) {
+      return res.status(403).json({
+        success: false,
+        error: `คุณไม่มีสิทธิ์เข้าถึงข้อมูลสถานี ${stationId}`,
+      });
+    }
+  }
+
   try {
     const readings = await getReadingsByStation(stationId, limit, offset, isStaffOrAdmin);
     res.json({ success: true, data: readings, count: readings.length });
@@ -241,6 +363,17 @@ router.get('/:stationId/range', optionalAuthenticate, async (req, res) => {
   const isStaffOrAdmin = Boolean(req.user && (req.user.role === 'admin' || req.user.role === 'staff'));
   const { stationId } = req.params;
   const { start, end } = req.query;
+
+  // Restrict staff
+  if (req.user && req.user.role === 'staff') {
+    const staffStationIds = await getEffectiveUserStationIds(req.user.id);
+    if (!staffStationIds || !staffStationIds.includes(stationId)) {
+      return res.status(403).json({
+        success: false,
+        error: `คุณไม่มีสิทธิ์เข้าถึงข้อมูลสถานี ${stationId}`,
+      });
+    }
+  }
 
   if (!start || !end) {
     return res.status(400).json({

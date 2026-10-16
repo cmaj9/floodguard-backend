@@ -99,10 +99,81 @@ function requireRole(allowedRoles) {
   };
 }
 
+/**
+ * Get real-time station_ids for an authenticated user directly from PostgreSQL
+ * If user is not staff, returns null (meaning unrestricted access for admin/others)
+ * If user is staff, returns array of station_id strings (e.g. ['ST-001'] or [])
+ */
+async function getEffectiveUserStationIds(userId) {
+  if (!userId) return [];
+  try {
+    const db = require('../config/database');
+    const res = await db.query('SELECT station_ids, role FROM users WHERE user_id = $1 LIMIT 1', [userId]);
+    if (res.rows.length === 0) return [];
+    const row = res.rows[0];
+    if (row.role !== 'staff') return null; // Admin or others are not restricted by assigned stations
+    return Array.isArray(row.station_ids) ? row.station_ids : [];
+  } catch (err) {
+    console.error('[auth] Error fetching user station_ids from DB:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Middleware: Verify that staff only accesses stations they are assigned to.
+ * Admins pass unconditionally.
+ * @param {string} source - where stationId is located: 'params', 'query', or 'body'
+ * @param {string} paramKey - key name, defaults to 'stationId'
+ */
+function requireStationAccess(source = 'params', paramKey = 'stationId') {
+  return async (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        error: 'กรุณาเข้าสู่ระบบก่อนดำเนินการ',
+      });
+    }
+
+    if (req.user.role === 'admin') {
+      return next();
+    }
+
+    if (req.user.role === 'staff') {
+      const stationId = (req[source] && req[source][paramKey]) ? String(req[source][paramKey]).trim() : null;
+      if (!stationId) {
+        return res.status(400).json({
+          success: false,
+          error: 'ไม่พบรหัสสถานีที่ต้องการดำเนินการ',
+        });
+      }
+
+      const assignedStationIds = await getEffectiveUserStationIds(req.user.id);
+      const isAssigned = assignedStationIds && assignedStationIds.includes(stationId);
+
+      if (!isAssigned) {
+        return res.status(403).json({
+          success: false,
+          error: `คุณไม่มีสิทธิ์เข้าถึงหรือจัดการข้อมูลสถานี ${stationId} (อยู่นอกเหนือสถานีที่ได้รับมอบหมาย)`,
+        });
+      }
+
+      req.userAssignedStationIds = assignedStationIds;
+      return next();
+    }
+
+    return res.status(403).json({
+      success: false,
+      error: 'คุณไม่มีสิทธิ์เข้าถึงส่วนนี้',
+    });
+  };
+}
+
 module.exports = {
   generateToken,
   authenticateToken,
   optionalAuthenticate,
   requireRole,
+  getEffectiveUserStationIds,
+  requireStationAccess,
   JWT_SECRET,
 };

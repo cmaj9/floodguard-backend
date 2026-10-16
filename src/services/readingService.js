@@ -35,19 +35,52 @@ function parseChirpStackPayload(payload) {
     };
   }
 
-  // ── Format 2: Raw Base64 bytes ────────────────────────────────────
+  // ── Format 2: Raw Base64 bytes (FloodGuard Master Node 26-Byte Binary Protocol)
   else if (payload.data && typeof payload.data === 'string') {
     try {
       const buf = Buffer.from(payload.data, 'base64');
-      // Expected byte layout (example - adjust to your firmware):
-      // [0-1]   distance to water : int16 / 100  → meters
-      // [2-3]   temperature       : int16 / 100  → °C
-      // [4-5]   humidity          : uint16 / 100 → %
-      // [6-7]   battery_volt      : uint16 / 1000 → V
-      // [8]     battery_pct       : uint8         → %
-      // [9-10]  tilt_x            : int16 / 100
-      // [11-12] tilt_y            : int16 / 100
-      if (buf.length >= 9) {
+      // FloodGuard Master Node 26-Byte Layout:
+      // [0]     station_id      : uint8
+      // [1-2]   water_level     : uint16BE / 10  → distance to water in cm
+      // [3-6]   latitude        : int32BE  / 1,000,000 → deg
+      // [7-10]  longitude       : int32BE  / 1,000,000 → deg
+      // [11-12] battery_voltage : uint16BE / 100 → V
+      // [13]    battery_percent : uint8         → %
+      // [14-15] temperature     : int16BE  / 10  → °C
+      // [16-17] humidity        : uint16BE / 10  → %
+      // [18-19] gyro_x          : int16BE  / 100 → deg
+      // [20-21] gyro_y          : int16BE  / 100 → deg
+      // [22-25] epoch           : uint32BE      → UNIX Epoch timestamp (seconds)
+      if (buf.length >= 26) {
+        const rawStationId = buf.readUInt8(0);
+        const rawLevelCm   = buf.readUInt16BE(1) / 10;
+        const rawLat       = buf.readInt32BE(3) / 1000000.0;
+        const rawLng       = buf.readInt32BE(7) / 1000000.0;
+        const batV         = buf.readUInt16BE(11) / 100.0;
+        const batPct       = buf.readUInt8(13);
+        const temp         = buf.readInt16BE(14) / 10.0;
+        const hum          = buf.readUInt16BE(16) / 10.0;
+        const gx           = buf.readInt16BE(18) / 100.0;
+        const gy           = buf.readInt16BE(20) / 100.0;
+        const epochSec     = buf.readUInt32BE(22);
+
+        fields = {
+          station_id:      rawStationId,
+          raw_distance:    parseFloat((rawLevelCm / 100).toFixed(3)), // cm -> meters
+          water_level:     null, // Will be computed relative to station reference point
+          is_blind_zone:   false,
+          temperature:     temp,
+          humidity:        hum,
+          battery_voltage: batV,
+          battery_percent: batPct,
+          tilt_x:          gx,
+          tilt_y:          gy,
+          latitude:        (rawLat !== 0 && !isNaN(rawLat)) ? parseFloat(rawLat.toFixed(6)) : null,
+          longitude:       (rawLng !== 0 && !isNaN(rawLng)) ? parseFloat(rawLng.toFixed(6)) : null,
+          epoch:           (epochSec > 1600000000) ? epochSec : null,
+        };
+      } else if (buf.length >= 9) {
+        // Fallback for legacy 9-13 bytes test nodes
         fields = {
           raw_distance:    buf.length >= 2  ? buf.readInt16BE(0) / 100   : null,
           water_level:     null,
@@ -243,12 +276,19 @@ async function processUplinkMessage(topic, payloadBuffer) {
 
   const { devEui, fields, rssi, snr } = parseChirpStackPayload(payload);
 
-  // Extract timestamp from payload: measured_at (from sensor), payload.time (from ChirpStack), or now
-  const rawTime = payload.object?.measured_at || payload.time;
-  const timestamp = rawTime ? new Date(rawTime) : new Date();
+  // Extract timestamp: prioritize GPS epoch from firmware (preserves backlog time), then measured_at, payload.time, or now
+  let timestamp;
+  if (fields.epoch && fields.epoch > 1600000000) {
+    timestamp = new Date(fields.epoch * 1000);
+  } else if (payload.object?.epoch && payload.object.epoch > 1600000000) {
+    timestamp = new Date(payload.object.epoch * 1000);
+  } else {
+    const rawTime = payload.object?.measured_at || payload.time;
+    timestamp = rawTime ? new Date(rawTime) : new Date();
+  }
 
-  // Extract payload station_id from decoded object or root
-  const payloadStationId = payload.object?.station_id ?? payload.station_id ?? null;
+  // Extract payload station_id from decoded binary fields, decoded object, or root
+  const payloadStationId = fields.station_id ?? payload.object?.station_id ?? payload.station_id ?? null;
 
   // Try mapping from payload station_id first, then fallback to devEui
   let stationId = await findStationByPayloadId(payloadStationId);
@@ -842,6 +882,7 @@ async function exportReadingsToCSV({ stationId, startTime, endTime, timeRange, i
 
 module.exports = {
   processUplinkMessage,
+  parseChirpStackPayload,
   getLatestReadingsPerStation,
   getReadingsByStation,
   getReadingsInRange,
