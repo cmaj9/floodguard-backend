@@ -42,7 +42,7 @@ router.put('/settings', authenticateToken, requireRole(['admin']), async (req, r
       // Evaluate all active stations
       const activeStationsRes = await db.query(`SELECT station_id FROM station WHERE status = 'active'`);
       for (const st of activeStationsRes.rows) {
-        const alerts = await evaluateStationAlertsNow(st.station_id);
+        const alerts = await evaluateStationAlertsNow(st.station_id, { bypassCooldown: true });
         if (alerts && alerts.length > 0) triggeredAlerts.push(...alerts);
       }
     } catch (evalErr) {
@@ -81,7 +81,7 @@ router.put('/settings/:stationId', authenticateToken, requireRole(['admin', 'sta
     const updated = await saveSettings(req.body, stationId);
     let triggeredAlerts = [];
     try {
-      triggeredAlerts = await evaluateStationAlertsNow(stationId);
+      triggeredAlerts = await evaluateStationAlertsNow(stationId, { bypassCooldown: true });
       if (triggeredAlerts && triggeredAlerts.length > 0) {
         console.log(`[NotificationSettings] Triggered ${triggeredAlerts.length} immediate alert(s) for station ${stationId} upon settings update`);
       }

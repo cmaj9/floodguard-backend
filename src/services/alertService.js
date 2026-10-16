@@ -97,11 +97,11 @@ async function isAlertOnCooldown(stationId, alertType, cooldownMinutes = ALERT_C
 /**
  * Save alert to database and dispatch LINE Flex notifications to subscribed users
  */
-async function saveAndNotify({ stationId, stationName, alertType, severity = null, value, threshold, message, refName, station, cooldownMinutes, isManualOffline = false }) {
+async function saveAndNotify({ stationId, stationName, alertType, severity = null, value, threshold, message, refName, station, cooldownMinutes, isManualOffline = false, bypassCooldown = false }) {
   try {
     const effectiveCooldown = cooldownMinutes || ALERT_COOLDOWN_MINUTES;
     // 1. Check cooldown to avoid flooding users (with severity escalation support)
-    const onCooldown = await isAlertOnCooldown(stationId, alertType, effectiveCooldown, severity);
+    const onCooldown = bypassCooldown ? false : await isAlertOnCooldown(stationId, alertType, effectiveCooldown, severity);
     if (onCooldown) {
       console.log(`[AlertService] Alert ${alertType} (${severity || 'normal'}) for ${stationId} is on cooldown (< ${effectiveCooldown}m), skipping duplicate`);
       return null;
@@ -143,9 +143,14 @@ async function saveAndNotify({ stationId, stationName, alertType, severity = nul
         station: stationInfo,
       });
 
-      await sendLineAlert(lineUserIds, flexMsg);
+      const lineResult = await sendLineAlert(lineUserIds, flexMsg);
+      if (!lineResult.success) {
+        console.warn(`[AlertService] Alert ${savedAlert.alert_id} saved to DB, but LINE delivery failed: ${lineResult.error || lineResult.reason}`);
+      }
+      savedAlert.line_delivery = lineResult;
     } else {
       console.log(`[AlertService] No LINE subscribers found for station ${stationId} (manual_offline=${isManualOffline})`);
+      savedAlert.line_delivery = { success: false, reason: 'No recipients' };
     }
 
     return savedAlert;
@@ -161,7 +166,7 @@ async function saveAndNotify({ stationId, stationName, alertType, severity = nul
  * - Critical Level: Triggers when water_level >= critical_level - safety_offset (early warning)
  * - Escalation: Escalation from Warning to Critical bypasses cooldown immediately
  */
-async function checkWaterLevel(station, fields, settings, isManualOffline = false) {
+async function checkWaterLevel(station, fields, settings, isManualOffline = false, bypassCooldown = false) {
   if (settings.water_level_enabled === false) return;
   if (fields.water_level == null) return;
 
@@ -186,7 +191,7 @@ async function checkWaterLevel(station, fields, settings, isManualOffline = fals
 
       const manualOfflineNotice = isManualOffline ? ' [โหมดทดสอบ: เฉพาะเจ้าหน้าที่]' : '';
 
-      await saveAndNotify({
+      return await saveAndNotify({
         stationId: station.station_id,
         stationName: station.station_name,
         alertType: 'water_level',
@@ -196,14 +201,14 @@ async function checkWaterLevel(station, fields, settings, isManualOffline = fals
         refName,
         cooldownMinutes: cooldownMin,
         isManualOffline,
+        bypassCooldown,
         message: `${headline} ${formatLevel(current)} ม. (${relativeDesc}) แตะเกณฑ์ ${formatLevel(station.critical_level)} ม.${manualOfflineNotice}`,
       });
-      return;
     }
   }
 
   // In manual offline mode, warning alerts are suppressed (only critical triggers staff notification)
-  if (isManualOffline) return;
+  if (isManualOffline) return null;
 
   // 2. Warning check (Safety Offset NOT applied to warning level, per user specification)
   if (station.warning_level != null) {
@@ -213,7 +218,7 @@ async function checkWaterLevel(station, fields, settings, isManualOffline = fals
         ? `สูงกว่า${refName} ${Math.abs(current).toFixed(2)} ม.`
         : `ต่ำกว่า${refName} ${Math.abs(current).toFixed(2)} ม.`;
 
-      await saveAndNotify({
+      return await saveAndNotify({
         stationId: station.station_id,
         stationName: station.station_name,
         alertType: 'water_level',
@@ -223,19 +228,21 @@ async function checkWaterLevel(station, fields, settings, isManualOffline = fals
         refName,
         cooldownMinutes: cooldownMin,
         isManualOffline: false,
+        bypassCooldown,
         message: `ระดับน้ำแตะเกณฑ์เฝ้าระวัง ${formatLevel(current)} ม. (${relativeDesc}) แตะเกณฑ์ ${formatLevel(station.warning_level)} ม.`,
       });
     }
   }
+  return null;
 }
 
 /**
  * Check Sensor Blind Zone Condition
  */
-async function checkBlindZone(station, fields, settings = {}, isManualOffline = false) {
+async function checkBlindZone(station, fields, settings = {}, isManualOffline = false, bypassCooldown = false) {
   if (fields.is_blind_zone && fields.raw_distance != null) {
     const limit = station.blind_zone_offset || 0.28;
-    await saveAndNotify({
+    return await saveAndNotify({
       stationId: station.station_id,
       stationName: station.station_name,
       alertType: 'water_level',
@@ -245,17 +252,19 @@ async function checkBlindZone(station, fields, settings = {}, isManualOffline = 
       refName: station.reference_point_name,
       cooldownMinutes: settings.water_level_cooldown_minutes || 30,
       isManualOffline,
+      bypassCooldown,
       message: `ผิวน้ำเข้าใกล้หัวเซนเซอร์ในระยะบอด (${fields.raw_distance.toFixed(2)} ม. <= ${limit.toFixed(2)} ม.) เซนเซอร์อาจจมน้ำหรืออ่านค่าคลาดเคลื่อน`,
     });
   }
+  return null;
 }
 
 /**
  * Check Condition 2: Rate of Rise (ระดับน้ำเพิ่มขึ้นในอัตราที่สูงกว่าปกติ)
  */
-async function checkRateOfRise(station, fields, settings, currentTimestamp = new Date()) {
-  if (settings.rate_of_rise_enabled === false) return;
-  if (fields.water_level == null) return;
+async function checkRateOfRise(station, fields, settings, currentTimestamp = new Date(), bypassCooldown = false) {
+  if (settings.rate_of_rise_enabled === false) return null;
+  if (fields.water_level == null) return null;
 
   const threshold = settings.rate_of_rise_threshold || 0.30;
 
@@ -273,7 +282,7 @@ async function checkRateOfRise(station, fields, settings, currentTimestamp = new
       [station.station_id, currentTimestamp]
     );
 
-    if (res.rows.length === 0) return;
+    if (res.rows.length === 0) return null;
 
     const prev = res.rows[0];
     const hoursDiff = (new Date(currentTimestamp) - new Date(prev.timestamp)) / (1000 * 60 * 60);
@@ -281,7 +290,7 @@ async function checkRateOfRise(station, fields, settings, currentTimestamp = new
     if (hoursDiff > 0.05) { // At least 3 minutes apart
       const ratePerHour = (fields.water_level - prev.water_level) / hoursDiff;
       if (ratePerHour >= threshold) {
-        await saveAndNotify({
+        return await saveAndNotify({
           stationId: station.station_id,
           stationName: station.station_name,
           alertType: 'rate_of_rise',
@@ -290,6 +299,7 @@ async function checkRateOfRise(station, fields, settings, currentTimestamp = new
           refName: station.reference_point_name,
           cooldownMinutes: settings.rate_of_rise_cooldown_minutes || 30,
           isManualOffline: false,
+          bypassCooldown,
           message: `อัตราการเพิ่มของระดับน้ำสูงผิดปกติ +${ratePerHour.toFixed(2)} ม./ชม. (เกณฑ์ ${threshold} ม./ชม.)`,
         });
       }
@@ -297,19 +307,20 @@ async function checkRateOfRise(station, fields, settings, currentTimestamp = new
   } catch (err) {
     console.error('[AlertService] checkRateOfRise error:', err.message);
   }
+  return null;
 }
 
 /**
  * Check Condition 4: Battery Level Low (แบตเตอรี่ของอุปกรณ์ต่ำกว่าค่าที่กำหนด)
  */
-async function checkBatteryLevel(station, fields, settings, isManualOffline = false) {
-  if (settings.battery_low_enabled === false) return;
-  if (fields.battery_percent == null) return;
+async function checkBatteryLevel(station, fields, settings, isManualOffline = false, bypassCooldown = false) {
+  if (settings.battery_low_enabled === false) return null;
+  if (fields.battery_percent == null) return null;
 
   const threshold = settings.battery_low_threshold || 20.0;
 
   if (fields.battery_percent <= threshold) {
-    await saveAndNotify({
+    return await saveAndNotify({
       stationId: station.station_id,
       stationName: station.station_name,
       alertType: 'battery',
@@ -318,18 +329,20 @@ async function checkBatteryLevel(station, fields, settings, isManualOffline = fa
       refName: station.reference_point_name,
       cooldownMinutes: settings.battery_low_cooldown_minutes || 120,
       isManualOffline,
+      bypassCooldown,
       message: `ระดับแบตเตอรี่สถานีต่ำ ${fields.battery_percent}% (เกณฑ์ <= ${threshold}%)`,
     });
   }
+  return null;
 }
 
 /**
  * Check Condition 5: Geofence (อุปกรณ์เคลื่อนออกนอกขอบเขตพื้นที่ที่กำหนดไว้)
  */
-async function checkGeofence(station, fields, settings) {
-  if (settings.geofence_enabled === false) return;
-  if (fields.latitude == null || fields.longitude == null) return;
-  if (station.latitude == null || station.longitude == null) return;
+async function checkGeofence(station, fields, settings, bypassCooldown = false) {
+  if (settings.geofence_enabled === false) return null;
+  if (fields.latitude == null || fields.longitude == null) return null;
+  if (station.latitude == null || station.longitude == null) return null;
 
   const threshold = settings.geofence_radius_meters || 100.0;
 
@@ -341,7 +354,7 @@ async function checkGeofence(station, fields, settings) {
   );
 
   if (distanceMeters > threshold) {
-    await saveAndNotify({
+    return await saveAndNotify({
       stationId: station.station_id,
       stationName: station.station_name,
       alertType: 'geofence',
@@ -349,9 +362,11 @@ async function checkGeofence(station, fields, settings) {
       threshold,
       refName: station.reference_point_name,
       cooldownMinutes: settings.geofence_cooldown_minutes || 60,
+      bypassCooldown,
       message: `สถานีเคลื่อนที่ออกนอกตำแหน่งเดิม ${distanceMeters.toFixed(1)} ม. (เกณฑ์ ${threshold} ม.)`,
     });
   }
+  return null;
 }
 
 /**
@@ -684,10 +699,10 @@ async function acknowledgeAlert(alertId) {
  * an alert is dispatched immediately to LINE OA and stored in database.
  * Returns array of alerts created.
  */
-async function evaluateStationAlertsNow(stationId) {
+async function evaluateStationAlertsNow(stationId, { bypassCooldown = false } = {}) {
   try {
     const stationRes = await db.query(
-      `SELECT station_id, station_name, status, reference_point_name, blind_zone_offset, warning_level, critical_level, latitude, longitude
+      `SELECT station_id, station_name, status, reference_point_name, sensor_to_ref_distance, blind_zone_offset, warning_level, critical_level, latitude, longitude
        FROM station
        WHERE station_id = $1 LIMIT 1`,
       [stationId]
@@ -705,18 +720,29 @@ async function evaluateStationAlertsNow(stationId) {
       [stationId]
     );
     if (readingRes.rows.length === 0) return [];
-    const fields = readingRes.rows[0];
+    const fields = { ...readingRes.rows[0] };
+
+    // Always recalculate water_level from sensor_to_ref_distance - raw_distance if raw_distance is present
+    if (fields.raw_distance != null && station.sensor_to_ref_distance != null) {
+      fields.water_level = Number(
+        (Number(station.sensor_to_ref_distance) - Number(fields.raw_distance)).toFixed(4)
+      );
+    }
 
     const settings = await getSettings(stationId);
 
     // Check all rules concurrently
-    await Promise.allSettled([
-      checkWaterLevel(station, fields, settings),
-      checkBlindZone(station, fields, settings),
-      checkRateOfRise(station, fields, settings, new Date(fields.timestamp || Date.now())),
-      checkBatteryLevel(station, fields, settings),
-      checkGeofence(station, fields, settings),
+    const settledResults = await Promise.allSettled([
+      checkWaterLevel(station, fields, settings, false, bypassCooldown),
+      checkBlindZone(station, fields, settings, false, bypassCooldown),
+      checkRateOfRise(station, fields, settings, new Date(fields.timestamp || Date.now()), bypassCooldown),
+      checkBatteryLevel(station, fields, settings, false, bypassCooldown),
+      checkGeofence(station, fields, settings, bypassCooldown),
     ]);
+
+    const createdAlerts = settledResults
+      .filter((r) => r.status === 'fulfilled' && r.value)
+      .map((r) => r.value);
 
     // Also check offline timeout if enabled
     if (settings.offline_timeout_enabled !== false) {
@@ -726,7 +752,7 @@ async function evaluateStationAlertsNow(stationId) {
         : timeoutMinutes + 1;
 
       if (minutesOffline >= timeoutMinutes) {
-        await saveAndNotify({
+        const offlineAlert = await saveAndNotify({
           stationId: station.station_id,
           stationName: station.station_name,
           alertType: 'offline',
@@ -734,24 +760,101 @@ async function evaluateStationAlertsNow(stationId) {
           threshold: timeoutMinutes,
           refName: station.reference_point_name,
           cooldownMinutes: settings.offline_cooldown_minutes || 60,
+          bypassCooldown,
           message: `สถานีขาดการส่งข้อมูลเข้าสู่ระบบเป็นเวลา ${minutesOffline} นาที (เกณฑ์ ${timeoutMinutes} นาที)`,
         });
+        if (offlineAlert) createdAlerts.push(offlineAlert);
       }
     }
 
-    // Fetch alerts created in the last 15 seconds for this station
-    const recentAlertsRes = await db.query(
-      `SELECT alert_id, station_id, alert_type, value, threshold, message, timestamp
-       FROM alerts
-       WHERE station_id = $1 AND timestamp >= NOW() - INTERVAL '15 seconds'
-       ORDER BY timestamp DESC`,
-      [stationId]
-    );
-
-    return recentAlertsRes.rows;
+    return createdAlerts;
   } catch (err) {
     console.error(`[AlertService] evaluateStationAlertsNow error for ${stationId}:`, err.message);
     return [];
+  }
+}
+
+/**
+ * Broadcast immediate emergency alerts via LINE OA for specified stations (or all critical/warning stations)
+ * Bypasses cooldown so manual emergency broadcasts from Dashboard always dispatch immediately.
+ */
+async function broadcastEmergencyAlerts(stationIds = []) {
+  try {
+    let targetIds = Array.isArray(stationIds)
+      ? stationIds.filter((id) => typeof id === 'string' && id.trim().length > 0)
+      : [];
+
+    if (targetIds.length === 0) {
+      const critRes = await db.query(
+        `SELECT station_id FROM station WHERE status = 'active' ORDER BY station_id ASC`
+      );
+      targetIds = critRes.rows.map((r) => r.station_id);
+    }
+
+    const alertsCreated = [];
+    let totalRecipients = 0;
+    let lineError = null;
+
+    for (const stId of targetIds) {
+      const stationRes = await db.query(
+        `SELECT station_id, station_name, status, reference_point_name, sensor_to_ref_distance, warning_level, critical_level, latitude, longitude
+         FROM station WHERE station_id = $1 LIMIT 1`,
+        [stId]
+      );
+      if (stationRes.rows.length === 0) continue;
+      const station = stationRes.rows[0];
+
+      const readingRes = await db.query(
+        `SELECT * FROM readings WHERE station_id = $1 ORDER BY timestamp DESC LIMIT 1`,
+        [stId]
+      );
+      const fields = readingRes.rows[0] ? { ...readingRes.rows[0] } : {};
+      if (fields.raw_distance != null && station.sensor_to_ref_distance != null) {
+        fields.water_level = Number(
+          (Number(station.sensor_to_ref_distance) - Number(fields.raw_distance)).toFixed(4)
+        );
+      }
+
+      const currentLevel = Number(fields.water_level ?? 0);
+      const refName = station.reference_point_name || 'จุดอ้างอิง';
+      const formatLevel = (val) => `${Number(val) >= 0 ? '+' : ''}${Number(val).toFixed(2)}`;
+      const relativeDesc =
+        currentLevel >= 0
+          ? `สูงกว่า${refName} ${Math.abs(currentLevel).toFixed(2)} ม.`
+          : `ต่ำกว่า${refName} ${Math.abs(currentLevel).toFixed(2)} ม.`;
+
+      const saved = await saveAndNotify({
+        stationId: station.station_id,
+        stationName: station.station_name,
+        alertType: 'water_level',
+        severity: 'critical',
+        value: currentLevel,
+        threshold: station.critical_level ?? station.warning_level ?? currentLevel,
+        refName,
+        cooldownMinutes: 0,
+        bypassCooldown: true,
+        message: `[แจ้งเตือนฉุกเฉินด่วน] ระดับน้ำ ${formatLevel(currentLevel)} ม. (${relativeDesc}) โปรดเฝ้าระวังและเตรียมพร้อมรับมือสถานการณ์น้ำ`,
+      });
+
+      if (saved) {
+        alertsCreated.push(saved);
+        if (saved.line_delivery?.success) {
+          totalRecipients += Number(saved.line_delivery.count || saved.line_delivery.recipients || 0);
+        } else if (saved.line_delivery?.error || saved.line_delivery?.reason) {
+          lineError = saved.line_delivery.error || saved.line_delivery.reason;
+        }
+      }
+    }
+
+    return {
+      success: alertsCreated.length > 0 && (!lineError || totalRecipients > 0),
+      alertsCreated,
+      totalRecipients,
+      lineError,
+    };
+  } catch (err) {
+    console.error('[AlertService] broadcastEmergencyAlerts error:', err.message);
+    return { success: false, error: err.message, alertsCreated: [], totalRecipients: 0 };
   }
 }
 
@@ -763,4 +866,5 @@ module.exports = {
   saveAndNotify,
   checkWaterLevel,
   evaluateStationAlertsNow,
+  broadcastEmergencyAlerts,
 };

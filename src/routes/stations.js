@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
 const { recalculateStationReadings } = require('../services/readingService');
+const { evaluateStationAlertsNow } = require('../services/alertService');
 const { authenticateToken, optionalAuthenticate, requireRole } = require('../middleware/auth');
 
 // ── GET /api/stations ─────────────────────────────────────────────
@@ -59,6 +60,12 @@ router.get('/', optionalAuthenticate, async (req, res) => {
         s.critical_level,
         s.max_level,
         s.normal_max,
+        s.dev_eui,
+        s.dev_eui AS mcu_id,
+        s.dev_euis,
+        s.payload_id,
+        s.model,
+        s.firmware_version,
         g.gateway_name,
         g.status AS gateway_status,
         -- Latest reading (subquery)
@@ -121,7 +128,7 @@ router.get('/', optionalAuthenticate, async (req, res) => {
           ELSE 'normal'
         END AS water_status
       FROM station s
-      JOIN gateway g ON g.gateway_id = s.gateway_id
+      LEFT JOIN gateway g ON g.gateway_id = s.gateway_id
       LEFT JOIN LATERAL (
         SELECT * FROM readings r
         WHERE r.station_id = s.station_id
@@ -291,7 +298,7 @@ router.get('/:stationId', optionalAuthenticate, async (req, res) => {
           ELSE 'normal'
         END AS water_status
       FROM station s
-      JOIN gateway g ON g.gateway_id = s.gateway_id
+      LEFT JOIN gateway g ON g.gateway_id = s.gateway_id
       LEFT JOIN LATERAL (
         SELECT * FROM readings r
         WHERE r.station_id = s.station_id
@@ -437,11 +444,21 @@ router.put('/:stationId/calibration', authenticateToken, requireRole(['admin', '
 
     await client.query('COMMIT');
     console.log(`[API /stations] Station ${stationId} calibrated: D_ref=${newSensorToRef}m, Recalculated=${recalculatedCount} readings`);
+
+    // Immediately evaluate alert conditions against the new reference point and latest reading
+    let triggeredAlerts = [];
+    try {
+      triggeredAlerts = await evaluateStationAlertsNow(stationId, { bypassCooldown: true });
+    } catch (evalErr) {
+      console.warn(`[API /stations/${stationId}/calibration] Immediate alert evaluation warning:`, evalErr.message);
+    }
+
     res.json({
       success: true,
       data: updated,
       recalculatedCount,
-      message: 'บันทึกการตั้งค่าจุดอ้างอิงและคำนวณค่าระดับน้ำทั้งหมดสำเร็จ',
+      triggeredAlerts,
+      message: 'บันทึกการตั้งค่าจุดอ้างอิงและคำนวณค่าระดับน้ำทั้งหมดสำเร็จ' + (triggeredAlerts.length > 0 ? ` (ตรวจพบและส่งการแจ้งเตือน ${triggeredAlerts.length} รายการ)` : ''),
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -473,9 +490,41 @@ router.put('/:stationId', authenticateToken, requireRole(['admin', 'staff']), as
     tilt_compensation_enabled,
     tilt_offset_x,
     tilt_offset_y,
+    dev_eui,
+    payload_id,
   } = req.body;
 
   try {
+    const isDevEuiProvided = dev_eui !== undefined;
+    let cleanDevEui = null;
+    if (isDevEuiProvided && dev_eui !== null && String(dev_eui).trim() !== '') {
+      cleanDevEui = String(dev_eui).trim().toLowerCase();
+      if (!/^[0-9a-fA-F]{16}$/.test(cleanDevEui)) {
+        return res.status(400).json({
+          success: false,
+          error: 'DevEUI ต้องเป็นเลขฐาน 16 จำนวน 16 หลัก (เช่น 65bcbb52145372b1)',
+        });
+      }
+
+      // Check uniqueness against other stations
+      const dupDevEui = await db.query(
+        `SELECT station_id FROM station WHERE (dev_eui = $1 OR $1 = ANY(dev_euis)) AND station_id != $2`,
+        [cleanDevEui, stationId]
+      );
+      if (dupDevEui.rows.length > 0) {
+        return res.status(409).json({
+          success: false,
+          error: `DevEUI "${cleanDevEui}" ถูกใช้งานโดยสถานี "${dupDevEui.rows[0].station_id}" แล้ว`,
+        });
+      }
+    }
+
+    const isPayloadIdProvided = payload_id !== undefined;
+    let cleanPayloadId = null;
+    if (isPayloadIdProvided && payload_id !== null && String(payload_id).trim() !== '') {
+      cleanPayloadId = String(payload_id).trim();
+    }
+
     const refName = reference_point_name && reference_point_name.trim() !== ''
       ? reference_point_name.trim()
       : 'จุดอ้างอิง';
@@ -507,8 +556,11 @@ router.put('/:stationId', authenticateToken, requireRole(['admin', 'staff']), as
         blind_zone_offset         = COALESCE($13, blind_zone_offset),
         tilt_compensation_enabled = COALESCE($14, tilt_compensation_enabled),
         tilt_offset_x             = COALESCE($15, tilt_offset_x),
-        tilt_offset_y             = COALESCE($16, tilt_offset_y)
-      WHERE station_id = $17
+        tilt_offset_y             = COALESCE($16, tilt_offset_y),
+        dev_eui                   = CASE WHEN $17::boolean THEN $18::varchar ELSE dev_eui END,
+        dev_euis                  = CASE WHEN $17::boolean THEN (CASE WHEN $18 IS NOT NULL THEN ARRAY[$18::varchar]::text[] ELSE '{}'::text[] END) ELSE dev_euis END,
+        payload_id                = CASE WHEN $19::boolean THEN $20::varchar ELSE payload_id END
+      WHERE station_id = $21
       RETURNING *
     `;
 
@@ -529,6 +581,10 @@ router.put('/:stationId', authenticateToken, requireRole(['admin', 'staff']), as
       tilt_compensation_enabled != null ? Boolean(tilt_compensation_enabled) : null,
       tilt_offset_x != null && !isNaN(Number(tilt_offset_x)) ? Number(tilt_offset_x) : null,
       tilt_offset_y != null && !isNaN(Number(tilt_offset_y)) ? Number(tilt_offset_y) : null,
+      isDevEuiProvided,
+      cleanDevEui,
+      isPayloadIdProvided,
+      cleanPayloadId,
       stationId,
     ];
 
@@ -549,7 +605,22 @@ router.put('/:stationId', authenticateToken, requireRole(['admin', 'staff']), as
       }
     }
 
-    res.json({ success: true, data: updated, message: 'อัปเดตข้อมูลสถานีสำเร็จ' });
+    // Immediately evaluate alert conditions if calibration/threshold values were updated
+    let triggeredAlerts = [];
+    if (sensor_to_ref_distance != null || warning_level != null || critical_level != null) {
+      try {
+        triggeredAlerts = await evaluateStationAlertsNow(stationId, { bypassCooldown: true });
+      } catch (evalErr) {
+        console.warn(`[API /stations/${stationId}] Immediate alert evaluation warning:`, evalErr.message);
+      }
+    }
+
+    res.json({
+      success: true,
+      data: updated,
+      triggeredAlerts,
+      message: 'อัปเดตข้อมูลสถานีสำเร็จ' + (triggeredAlerts.length > 0 ? ` (ตรวจพบและส่งการแจ้งเตือน ${triggeredAlerts.length} รายการ)` : ''),
+    });
   } catch (err) {
     console.error(`[API /stations/${stationId}] Error:`, err.message);
     res.status(500).json({ success: false, error: 'Failed to update station' });
@@ -578,6 +649,8 @@ router.post('/', authenticateToken, requireRole(['admin', 'staff']), async (req,
     tilt_offset_x,
     tilt_offset_y,
     status,
+    dev_eui,
+    payload_id,
   } = req.body;
 
   if (!station_id || !station_name || !gateway_id) {
@@ -600,6 +673,50 @@ router.post('/', authenticateToken, requireRole(['admin', 'staff']), async (req,
       return res.status(400).json({ success: false, error: `ไม่พบ Gateway "${gateway_id}" ในระบบ` });
     }
 
+    // Validate dev_eui if provided
+    let cleanDevEui = null;
+    if (dev_eui !== undefined && dev_eui !== null && String(dev_eui).trim() !== '') {
+      cleanDevEui = String(dev_eui).trim().toLowerCase();
+      if (!/^[0-9a-fA-F]{16}$/.test(cleanDevEui)) {
+        return res.status(400).json({
+          success: false,
+          error: 'DevEUI ต้องเป็นเลขฐาน 16 จำนวน 16 หลัก (เช่น 65bcbb52145372b1)',
+        });
+      }
+
+      // Check for duplicate DevEUI
+      const dupDevEui = await db.query(
+        'SELECT station_id FROM station WHERE dev_eui = $1 OR $1 = ANY(dev_euis)',
+        [cleanDevEui]
+      );
+      if (dupDevEui.rows.length > 0) {
+        return res.status(409).json({
+          success: false,
+          error: `DevEUI "${cleanDevEui}" ถูกใช้งานโดยสถานี "${dupDevEui.rows[0].station_id}" แล้ว`,
+        });
+      }
+    }
+
+    // Determine payload_id
+    let cleanPayloadId = null;
+    if (payload_id !== undefined && payload_id !== null && String(payload_id).trim() !== '') {
+      cleanPayloadId = String(payload_id).trim();
+    } else {
+      // Auto-extract numeric ID from station_id (e.g. ST-004 -> 4)
+      const numMatch = station_id.match(/^ST-([0-9]+)$/i);
+      if (numMatch) {
+        cleanPayloadId = String(parseInt(numMatch[1], 10));
+      }
+    }
+
+    // Must provide at least one
+    if (!cleanDevEui && !cleanPayloadId) {
+      return res.status(400).json({
+        success: false,
+        error: 'กรุณาระบุ LoRaWAN DevEUI หรือ Payload ID เพื่อเชื่อมโยงกับฮาร์ดแวร์',
+      });
+    }
+
     const refName = reference_point_name && reference_point_name.trim() !== ''
       ? reference_point_name.trim()
       : 'จุดอ้างอิง';
@@ -619,14 +736,16 @@ router.post('/', authenticateToken, requireRole(['admin', 'staff']), async (req,
         sensor_to_ref_distance, reference_point_name,
         warning_level, critical_level, max_level, normal_max,
         blind_zone_offset, tilt_compensation_enabled,
-        tilt_offset_x, tilt_offset_y
+        tilt_offset_x, tilt_offset_y,
+        dev_eui, dev_euis, payload_id
       ) VALUES (
         $1, $2, $3, $4::"StationType",
         $5, $6, $7, NOW(), $8::"StationStatus",
         COALESCE($9, 2.0), $10,
         $11, $12, $13, $14,
         COALESCE($15, 0.28), COALESCE($16, true),
-        COALESCE($17, 0.0), COALESCE($18, 0.0)
+        COALESCE($17, 0.0), COALESCE($18, 0.0),
+        $19::varchar, (CASE WHEN $19 IS NOT NULL THEN ARRAY[$19::varchar]::text[] ELSE '{}'::text[] END), $20::varchar
       )
       RETURNING *
     `;
@@ -650,6 +769,8 @@ router.post('/', authenticateToken, requireRole(['admin', 'staff']), async (req,
       tilt_compensation_enabled != null ? Boolean(tilt_compensation_enabled) : true,
       tilt_offset_x != null && !isNaN(Number(tilt_offset_x)) ? Number(tilt_offset_x) : 0.0,
       tilt_offset_y != null && !isNaN(Number(tilt_offset_y)) ? Number(tilt_offset_y) : 0.0,
+      cleanDevEui,
+      cleanPayloadId,
     ];
 
     const result = await db.query(sql, values);

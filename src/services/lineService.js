@@ -108,8 +108,11 @@ async function replyMessage(replyToken, messages) {
   }
 }
 
+const LINE_API_PUSH = 'https://api.line.me/v2/bot/message/push';
+const LINE_ID_REGEX = /^[UCR][0-9a-f]{32}$/i;
+
 /**
- * Send alert message via LINE to one or more user IDs (Multicast)
+ * Send alert message via LINE to one or more user IDs (Multicast with Push Fallback)
  * Supports string, single message object (e.g. Flex), or array of messages
  */
 async function sendLineAlert(lineUserIds, messagePayload) {
@@ -117,9 +120,17 @@ async function sendLineAlert(lineUserIds, messagePayload) {
     return { success: false, reason: 'No recipient LINE user IDs' };
   }
 
-  const validIds = lineUserIds.filter(
-    (id) => id && typeof id === 'string' && id.trim().length > 0
-  );
+  const rawTrimmed = lineUserIds
+    .filter((id) => id && typeof id === 'string')
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0);
+
+  const invalidIds = rawTrimmed.filter((id) => !LINE_ID_REGEX.test(id));
+  if (invalidIds.length > 0) {
+    console.warn(`[LINE Service] Ignoring ${invalidIds.length} malformed LINE user ID(s):`, invalidIds);
+  }
+
+  const validIds = Array.from(new Set(rawTrimmed.filter((id) => LINE_ID_REGEX.test(id))));
   if (validIds.length === 0) {
     return { success: false, reason: 'No valid recipient LINE user IDs' };
   }
@@ -128,7 +139,7 @@ async function sendLineAlert(lineUserIds, messagePayload) {
     ? messagePayload
     : [typeof messagePayload === 'string' ? { type: 'text', text: messagePayload } : messagePayload];
 
-  const token = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
+  const token = (process.env.LINE_CHANNEL_ACCESS_TOKEN || '').trim();
   if (!token) {
     console.log(`[LINE Service (Dry-Run)] Would send to ${validIds.length} users:`);
     console.log(`Recipients: ${validIds.join(', ')}`);
@@ -142,6 +153,8 @@ async function sendLineAlert(lineUserIds, messagePayload) {
     for (let i = 0; i < validIds.length; i += CHUNK_SIZE) {
       chunks.push(validIds.slice(i, i + CHUNK_SIZE));
     }
+
+    let deliveredCount = 0;
 
     for (const chunk of chunks) {
       const response = await fetch(LINE_API_MULTICAST, {
@@ -162,13 +175,45 @@ async function sendLineAlert(lineUserIds, messagePayload) {
           console.error('[LINE Service] โควตาส่งข้อความของ LINE OA ประจำเดือนนี้เต็มแล้ว (HTTP 429: You have reached your monthly limit)! ระบบไม่สามารถส่งการแจ้งเตือนแบบ Push/Multicast ได้จนกว่าจะอัปเกรดแพ็กเกจบน LINE Official Account Manager หรือรอรีเซ็ตในวันแรกของเดือนถัดไป');
           return { success: false, error: 'MONTHLY_LIMIT_EXCEEDED', details: errorBody };
         }
+
+        // Fallback: if multicast batch of >1 recipients fails with 400 due to an invalid/unfollowed user ID, try individual push
+        if (response.status === 400 && chunk.length > 1 && errorBody.includes('"to"')) {
+          console.warn(`[LINE Service] Multicast 400 on 'to' field; falling back to individual push for ${chunk.length} recipients...`);
+          for (const singleId of chunk) {
+            const pushRes = await fetch(LINE_API_PUSH, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({
+                to: singleId,
+                messages: formattedMessages,
+              }),
+            });
+            if (pushRes.ok) {
+              deliveredCount += 1;
+            } else {
+              const pushErr = await pushRes.text();
+              console.warn(`[LINE Service] Individual push skipped for ${singleId} (${pushRes.status}): ${pushErr}`);
+            }
+          }
+          continue;
+        }
+
         console.error(`[LINE Service] Multicast error (${response.status}):`, errorBody);
         return { success: false, error: errorBody };
       }
+
+      deliveredCount += chunk.length;
     }
 
-    console.log(`[LINE Service] Alert sent successfully to ${validIds.length} user(s) via LINE OA`);
-    return { success: true, count: validIds.length };
+    if (deliveredCount === 0) {
+      return { success: false, error: 'Failed to deliver to any recipients' };
+    }
+
+    console.log(`[LINE Service] Alert sent successfully to ${deliveredCount} user(s) via LINE OA`);
+    return { success: true, count: deliveredCount };
   } catch (err) {
     console.error('[LINE Service] Failed to send LINE message:', err.message);
     return { success: false, error: err.message };
@@ -320,15 +365,21 @@ const BENTO_THEME = {
  */
 function getStationImageUrl(stationId) {
   const normId = String(stationId || '').toUpperCase().trim();
-  if (normId === 'ST-001' || normId === 'ST-01' || normId.includes('01')) {
+  const isMasterNode =
+    normId === 'ST-001' ||
+    normId === 'ST-01' ||
+    normId === '1' ||
+    /^ST-0*1$/.test(normId);
+
+  if (isMasterNode) {
     if (process.env.MASTER_NODE_IMAGE_URL && process.env.MASTER_NODE_IMAGE_URL.trim() !== '') {
       return process.env.MASTER_NODE_IMAGE_URL.trim();
     }
     const webUrl = getWebUrl();
     if (webUrl.startsWith('https://')) {
-      return `${webUrl}/masternodev2.jpg`;
+      return `${webUrl}/master_node_v3.jpg`;
     }
-    return 'https://waterwatch-frontend-mu.vercel.app/masternodev2.jpg';
+    return 'https://waterwatch-frontend-mu.vercel.app/master_node_v3.jpg';
   }
   return null;
 }

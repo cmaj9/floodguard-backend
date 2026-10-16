@@ -62,7 +62,12 @@ async function sendDailyWaterSummary(period = 'morning') {
     const sendResult = await sendLineAlert(lineRecipients, summaryFlex);
 
     console.log(`[Scheduler] Daily water summary (${period}) dispatch completed:`, sendResult);
-    return { success: true, count: lineRecipients.length, result: sendResult };
+    return {
+      success: Boolean(sendResult?.success),
+      count: sendResult?.count ?? lineRecipients.length,
+      result: sendResult,
+      error: sendResult?.error || sendResult?.reason || null,
+    };
   } catch (err) {
     console.error(`[Scheduler] Error in sendDailyWaterSummary (${period}):`, err.message);
     return { success: false, error: err.message };
@@ -71,8 +76,17 @@ async function sendDailyWaterSummary(period = 'morning') {
 
 /**
  * Initialize daily scheduled cron jobs (07:00 and 18:00 Asia/Bangkok)
+ * Disabled by default to conserve the LINE OA 300 messages/month free tier quota.
+ * Set ENABLE_DAILY_SUMMARY_CRON=true in environment variables to enable automatic daily summaries.
  */
 function initScheduler() {
+  if (process.env.ENABLE_DAILY_SUMMARY_CRON !== 'true') {
+    console.log(
+      '[Scheduler] Automated daily water summary cron (07:00 & 18:00) is DISABLED by default to conserve LINE OA monthly message quota (set ENABLE_DAILY_SUMMARY_CRON=true to enable).'
+    );
+    return { morningTask: null, eveningTask: null };
+  }
+
   console.log('[Scheduler] Initializing automated daily cron jobs (Asia/Bangkok timezone)...');
 
   // Morning schedule: 07:00 AM Bangkok time every day

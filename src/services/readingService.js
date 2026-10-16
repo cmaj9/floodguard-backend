@@ -105,24 +105,33 @@ async function findStationByDevEui(devEui) {
 async function findStationByPayloadId(payloadStationId) {
   if (payloadStationId == null) return null;
   try {
+    const rawStr = String(payloadStationId).trim();
+    if (!rawStr) return null;
+
     // If it's already in format 'ST-001', verify and return directly
-    if (typeof payloadStationId === 'string' && payloadStationId.startsWith('ST-')) {
+    if (rawStr.startsWith('ST-')) {
       const sRes = await db.query(
         `SELECT station_id FROM station WHERE station_id = $1 LIMIT 1`,
-        [payloadStationId]
+        [rawStr]
       );
       if (sRes.rows.length > 0) return sRes.rows[0].station_id;
     }
 
-    const numId = parseInt(payloadStationId, 10);
-    if (!isNaN(numId)) {
-      const res = await db.query(
-        `SELECT station_id FROM station WHERE payload_id = $1 LIMIT 1`,
-        [numId]
-      );
-      if (res.rows.length > 0) {
-        return res.rows[0].station_id;
-      }
+    const numId = parseInt(rawStr, 10);
+    const numStr = !isNaN(numId) ? String(numId) : rawStr;
+    const paddedStationId = !isNaN(numId) ? `ST-${String(numId).padStart(3, '0')}` : null;
+
+    const res = await db.query(
+      `SELECT station_id
+       FROM station
+       WHERE payload_id::text = $1
+          OR payload_id::text = $2
+          OR ($3::text IS NOT NULL AND station_id = $3)
+       LIMIT 1`,
+      [rawStr, numStr, paddedStationId]
+    );
+    if (res.rows.length > 0) {
+      return res.rows[0].station_id;
     }
     return null;
   } catch (err) {

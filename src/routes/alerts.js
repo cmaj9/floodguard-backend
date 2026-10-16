@@ -38,9 +38,36 @@ router.post('/broadcast-summary', authenticateToken, requireRole(['admin', 'staf
     const { sendDailyWaterSummary } = require('../services/schedulerService');
     const period = req.body?.period || 'manual';
     const result = await sendDailyWaterSummary(period);
+    if (!result.success) {
+      return res.status(400).json({ success: false, data: result, error: result.error || result.reason || 'ไม่สามารถส่งสรุปสถานการณ์น้ำผ่าน LINE OA ได้' });
+    }
     res.json({ success: true, data: result });
   } catch (err) {
     console.error('[API /alerts/broadcast-summary] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── POST /api/alerts/emergency-broadcast ───────────────────────────
+// Staff and Admin only: Trigger immediate critical LINE OA alerts for critical stations
+router.post('/emergency-broadcast', authenticateToken, requireRole(['admin', 'staff']), async (req, res) => {
+  try {
+    const stationIds = Array.isArray(req.body?.stationIds) ? req.body.stationIds : [];
+    const result = await alertService.broadcastEmergencyAlerts(stationIds);
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        data: result,
+        error: result.lineError || result.error || 'ไม่สามารถส่งแจ้งเตือนฉุกเฉินผ่าน LINE OA ได้',
+      });
+    }
+    res.json({
+      success: true,
+      data: result,
+      message: `ส่งสัญญาณแจ้งเตือนภัยฉุกเฉินไปยัง LINE OA สำเร็จ (${result.totalRecipients} ผู้รับ)`,
+    });
+  } catch (err) {
+    console.error('[API /alerts/emergency-broadcast] Error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
