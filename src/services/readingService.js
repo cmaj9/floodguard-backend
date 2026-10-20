@@ -327,6 +327,34 @@ async function processUplinkMessage(topic, payloadBuffer) {
     fields.is_blind_zone = fields.raw_distance <= blindZoneOffset;
   }
 
+  // ----------------------------------------------------
+  // GPS Deduplication Check (Minimal Impact / Zero DB Migration)
+  // Prevents duplicate inserts and duplicate LINE alerts when Gateway SQLite
+  // or Node Flash Backlog retransmits packets with the exact same GPS timestamp.
+  // ----------------------------------------------------
+  if (fields.epoch && fields.epoch > 1600000000) {
+    try {
+      const dupCheck = await db.query(
+        'SELECT reading_id FROM readings WHERE station_id = $1 AND timestamp = $2 LIMIT 1',
+        [stationId, timestamp]
+      );
+      if (dupCheck.rows.length > 0) {
+        console.log(
+          `[ReadingService] [DEDUP] Duplicate reading skipped (GPS epoch: ${fields.epoch}, time: ${timestamp.toISOString()}) | station: ${stationId} | existing reading_id: ${dupCheck.rows[0].reading_id}`
+        );
+
+        // Still update MCU and Gateway online status as requested
+        await updateMcuStatus(stationId, { rssi, battery_percent: fields.battery_percent });
+        await updateGatewayStatus(payload);
+
+        return; // Skip insertReading and skip alertService.checkReadingAlerts
+      }
+    } catch (dupErr) {
+      console.warn('[ReadingService] Deduplication check warning:', dupErr.message);
+      // Fall through to proceed normally if query fails
+    }
+  }
+
   // Insert reading
   try {
     const inserted = await insertReading(stationId, fields, rssi, snr, timestamp);
