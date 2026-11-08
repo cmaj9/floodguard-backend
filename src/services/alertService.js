@@ -51,9 +51,10 @@ async function isAlertOnCooldown(stationId, alertType, cooldownMinutes = ALERT_C
       if (res.rows.length > 0) {
         const lastAlert = res.rows[0];
         const lastIsCritical = lastAlert.message?.includes('วิกฤต') || false;
+        const lastIsWarning = lastAlert.message?.includes('เฝ้าระวัง') || false;
 
         // ESCALATION RULE: Transition from Warning to Critical ALWAYS bypasses cooldown!
-        if (severity === 'critical' && !lastIsCritical) {
+        if (severity === 'critical' && lastIsWarning && !lastIsCritical) {
           console.log(`[AlertService] Escalation from Warning to Critical for ${stationId}: bypassing cooldown`);
           return false;
         }
@@ -69,6 +70,7 @@ async function isAlertOnCooldown(stationId, alertType, cooldownMinutes = ALERT_C
            AND (
              ($3 = 'critical' AND message LIKE '%วิกฤต%')
              OR ($3 = 'warning' AND message LIKE '%เฝ้าระวัง%')
+             OR ($3 = 'blind_zone' AND message LIKE '%ระยะบอด%')
            )
          LIMIT 1`,
         [stationId, cooldownMinutes, severity]
@@ -792,7 +794,8 @@ async function broadcastEmergencyAlerts(stationIds = []) {
       ? stationIds.filter((id) => typeof id === 'string' && id.trim().length > 0)
       : [];
 
-    if (targetIds.length === 0) {
+    const isExplicitList = targetIds.length > 0;
+    if (!isExplicitList) {
       const critRes = await db.query(
         `SELECT station_id FROM station WHERE status = 'active' ORDER BY station_id ASC`
       );
@@ -817,6 +820,9 @@ async function broadcastEmergencyAlerts(stationIds = []) {
         [stId]
       );
       const fields = readingRes.rows[0] ? { ...readingRes.rows[0] } : {};
+      const hasValidReading = fields.raw_distance != null || fields.water_level != null;
+      if (!hasValidReading) continue;
+
       if (fields.raw_distance != null && station.sensor_to_ref_distance != null) {
         fields.water_level = Number(
           (Number(station.sensor_to_ref_distance) - Number(fields.raw_distance)).toFixed(4)
@@ -824,6 +830,13 @@ async function broadcastEmergencyAlerts(stationIds = []) {
       }
 
       const currentLevel = Number(fields.water_level ?? 0);
+
+      // When broadcasting without explicit stationIds, only broadcast for stations in critical or warning state
+      if (!isExplicitList) {
+        const isCrit = station.critical_level != null && currentLevel >= Number(station.critical_level);
+        const isWarn = station.warning_level != null && currentLevel >= Number(station.warning_level);
+        if (!isCrit && !isWarn) continue;
+      }
       const refName = station.reference_point_name || 'จุดอ้างอิง';
       const formatLevel = (val) => `${Number(val) >= 0 ? '+' : ''}${Number(val).toFixed(2)}`;
       const relativeDesc =

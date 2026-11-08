@@ -75,6 +75,7 @@ router.get('/history', optionalAuthenticate, async (req, res) => {
 
   // Build dynamic WHERE clauses
   const conditions = [];
+  const cteConditions = [];
   const values = [];
   let idx = 1;
 
@@ -99,36 +100,48 @@ router.get('/history', optionalAuthenticate, async (req, res) => {
         });
       }
     } else {
-      conditions.push(`r.station_id = ANY($${idx++})`);
+      const paramIdx = idx++;
+      conditions.push(`r.station_id = ANY($${paramIdx})`);
+      cteConditions.push(`r.station_id = ANY($${paramIdx})`);
       values.push(staffStationIds);
     }
   }
 
   if (stationId) {
-    conditions.push(`r.station_id = $${idx++}`);
+    const paramIdx = idx++;
+    conditions.push(`r.station_id = $${paramIdx}`);
+    cteConditions.push(`r.station_id = $${paramIdx}`);
     values.push(stationId);
   }
   if (start) {
     const startTime = new Date(start);
     if (!isNaN(startTime)) {
-      conditions.push(`r.timestamp >= $${idx++}`);
+      const paramIdx = idx++;
+      conditions.push(`r.timestamp >= $${paramIdx}`);
+      // Include a 3-hour lookback window inside the CTE so LAG() has the immediately preceding reading
+      cteConditions.push(`r.timestamp >= ($${paramIdx}::timestamptz - INTERVAL '3 hours')`);
       values.push(startTime);
     }
   }
   if (end) {
     const endTime = new Date(end);
     if (!isNaN(endTime)) {
-      conditions.push(`r.timestamp <= $${idx++}`);
+      const paramIdx = idx++;
+      conditions.push(`r.timestamp <= $${paramIdx}`);
+      cteConditions.push(`r.timestamp <= $${paramIdx}`);
       values.push(endTime);
     }
   }
 
   // Capped at manual_offline_at for non-staff if station is manually offline
   if (!isStaffOrAdmin) {
-    conditions.push(`(s.manual_offline_at IS NULL OR r.timestamp <= s.manual_offline_at)`);
+    const manualClause = `(s.manual_offline_at IS NULL OR r.timestamp <= s.manual_offline_at)`;
+    conditions.push(manualClause);
+    cteConditions.push(manualClause);
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const cteWhereClause = cteConditions.length > 0 ? `WHERE ${cteConditions.join(' AND ')}` : '';
   const outerConditions = conditions.map(c => c.replace(/\br\./g, 'b.').replace(/\bs\./g, 'b.'));
   const outerWhereClause = outerConditions.length > 0 ? `WHERE ${outerConditions.join(' AND ')}` : '';
 
@@ -145,6 +158,7 @@ router.get('/history', optionalAuthenticate, async (req, res) => {
         s.critical_level,
         r.timestamp,
         r.raw_distance,
+        (r.raw_distance IS NOT NULL OR r.water_level IS NOT NULL) AS has_reading,
         COALESCE(
           r.water_level,
           CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
@@ -152,7 +166,7 @@ router.get('/history', optionalAuthenticate, async (req, res) => {
         LAG(
           COALESCE(
             r.water_level,
-            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE NULL END
           )
         ) OVER (PARTITION BY r.station_id ORDER BY r.timestamp ASC) AS prev_water_level,
         LAG(r.timestamp) OVER (PARTITION BY r.station_id ORDER BY r.timestamp ASC) AS prev_timestamp,
@@ -182,6 +196,7 @@ router.get('/history', optionalAuthenticate, async (req, res) => {
         s.manual_offline_at
       FROM readings r
       JOIN station s ON s.station_id = r.station_id
+      ${cteWhereClause}
     )
     SELECT
       b.reading_id,
@@ -194,8 +209,10 @@ router.get('/history', optionalAuthenticate, async (req, res) => {
       b.critical_level,
       b.timestamp,
       b.raw_distance,
+      b.has_reading,
       b.water_level,
       CASE
+        WHEN NOT b.has_reading THEN 'normal'
         WHEN b.critical_level IS NOT NULL AND b.water_level >= b.critical_level THEN 'critical'
         WHEN b.warning_level IS NOT NULL AND b.water_level >= b.warning_level THEN 'warning'
         ELSE 'normal'
@@ -290,6 +307,7 @@ router.get('/export/csv', optionalAuthenticate, async (req, res) => {
   const selectedRange = timeRange || range;
 
   // Restrict staff export to assigned stations
+  let allowedStationIds = null;
   if (req.user && req.user.role === 'staff') {
     const staffStationIds = await getEffectiveUserStationIds(req.user.id);
     if (!staffStationIds || staffStationIds.length === 0) {
@@ -301,20 +319,22 @@ router.get('/export/csv', optionalAuthenticate, async (req, res) => {
         error: `คุณไม่มีสิทธิ์ส่งออกข้อมูลของสถานี ${stationId}`,
       });
     }
+    allowedStationIds = staffStationIds;
   }
 
   try {
     const csvData = await exportReadingsToCSV({
       stationId,
+      allowedStationIds,
       startTime: start,
       endTime: end,
       timeRange: selectedRange,
       isStaffOrAdmin,
     });
 
-    const now = new Date();
-    const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '') + '_' +
-      String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0');
+    const thaiNow = new Date(Date.now() + 7 * 60 * 60 * 1000);
+    const dateStr = thaiNow.toISOString().slice(0, 10).replace(/-/g, '') + '_' +
+      String(thaiNow.getUTCHours()).padStart(2, '0') + String(thaiNow.getUTCMinutes()).padStart(2, '0');
     const rangeSuffix = selectedRange ? `_${selectedRange}` : '';
     const filename = `readings_${stationId || 'all'}${rangeSuffix}_${dateStr}.csv`;
 

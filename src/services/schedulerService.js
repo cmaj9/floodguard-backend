@@ -29,6 +29,7 @@ async function sendDailyWaterSummary(period = 'morning') {
           END,
           0
         ) AS water_level,
+        (r.raw_distance IS NOT NULL OR r.water_level IS NOT NULL) AS has_reading,
         r.raw_distance,
         r.timestamp
       FROM station s

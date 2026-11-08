@@ -92,12 +92,16 @@ router.get('/', optionalAuthenticate, async (req, res) => {
         lr.raw_distance,
         s.tilt_offset_x::float AS tilt_offset_x,
         s.tilt_offset_y::float AS tilt_offset_y,
-        -- Pure relative water_level based on current sensor_to_ref_distance - raw_distance
-        CASE
-          WHEN lr.raw_distance IS NOT NULL THEN
-            ROUND((s.sensor_to_ref_distance - lr.raw_distance)::numeric, 3)
-          ELSE lr.water_level
-        END AS water_level,
+        -- Pure relative water_level based on current sensor_to_ref_distance - raw_distance (defaults to 0.00m datum when waiting for first reading)
+        (lr.raw_distance IS NOT NULL OR lr.water_level IS NOT NULL) AS has_reading,
+        COALESCE(
+          CASE
+            WHEN lr.raw_distance IS NOT NULL THEN
+              ROUND((s.sensor_to_ref_distance - lr.raw_distance)::numeric, 3)
+            ELSE lr.water_level
+          END,
+          0
+        ) AS water_level,
         lr.is_blind_zone,
         lr.temperature,
         lr.humidity,
@@ -293,11 +297,15 @@ router.get('/:stationId', optionalAuthenticate, async (req, res) => {
         lr.raw_distance,
         s.tilt_offset_x::float AS tilt_offset_x,
         s.tilt_offset_y::float AS tilt_offset_y,
-        CASE
-          WHEN lr.raw_distance IS NOT NULL THEN
-            ROUND((s.sensor_to_ref_distance - lr.raw_distance)::numeric, 3)
-          ELSE lr.water_level
-        END AS water_level,
+        (lr.raw_distance IS NOT NULL OR lr.water_level IS NOT NULL) AS has_reading,
+        COALESCE(
+          CASE
+            WHEN lr.raw_distance IS NOT NULL THEN
+              ROUND((s.sensor_to_ref_distance - lr.raw_distance)::numeric, 3)
+            ELSE lr.water_level
+          END,
+          0
+        ) AS water_level,
         lr.is_blind_zone,
         lr.temperature, lr.humidity,
         lr.battery_voltage, lr.battery_percent,
@@ -593,8 +601,8 @@ router.put('/:stationId', authenticateToken, requireRole(['admin', 'staff']), re
         END,
         sensor_to_ref_distance    = COALESCE($7, sensor_to_ref_distance),
         reference_point_name      = $8,
-        warning_level             = $9,
-        critical_level            = $10,
+        warning_level             = COALESCE($9, warning_level),
+        critical_level            = COALESCE($10, critical_level),
         max_level                 = COALESCE($11, max_level),
         normal_max                = COALESCE($12, normal_max),
         blind_zone_offset         = COALESCE($13, blind_zone_offset),

@@ -1197,10 +1197,19 @@ function createStatusSummaryFlexMessage(stations = [], options = {}) {
   // Create Carousel Cards for each station (up to 10 stations)
   const stationCards = stations.slice(0, 10).map((st) => {
     const refName = st.reference_point_name || 'จุดอ้างอิง';
-    let levelText = 'ไม่มีข้อมูล';
-    let statusTheme = BENTO_THEME.severity.normal;
+    const hasReading = st.has_reading !== undefined
+      ? Boolean(st.has_reading)
+      : (st.raw_distance != null || st.timestamp != null);
+    let levelText = '0.00 ม. (รอข้อมูล)';
+    let statusTheme = {
+      color: '#64748B',
+      badgeBg: '#F1F5F9',
+      badgeBorder: '#CBD5E1',
+      dot: '#94A3B8',
+      label: 'รอข้อมูลเซนเซอร์',
+    };
 
-    if (st.water_level != null) {
+    if (hasReading && st.water_level != null) {
       const wVal = Number(st.water_level);
       levelText = `${wVal >= 0 ? '+' : ''}${wVal.toFixed(2)} ม.`;
       if (st.critical_level != null && wVal >= Number(st.critical_level)) {

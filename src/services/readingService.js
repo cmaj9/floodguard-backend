@@ -304,10 +304,13 @@ async function processUplinkMessage(topic, payloadBuffer) {
   let sensorToRef = 2.0;
   let blindZoneOffset = 0.28;
   let tiltCompensationEnabled = true;
+  let tiltOffsetX = 0;
+  let tiltOffsetY = 0;
 
   try {
     const sRes = await db.query(
-      `SELECT sensor_to_ref_distance, reference_point_name, blind_zone_offset, tilt_compensation_enabled
+      `SELECT sensor_to_ref_distance, reference_point_name, blind_zone_offset, tilt_compensation_enabled,
+              COALESCE(tilt_offset_x, 0) AS tilt_offset_x, COALESCE(tilt_offset_y, 0) AS tilt_offset_y
        FROM station WHERE station_id = $1 LIMIT 1`,
       [stationId]
     );
@@ -316,14 +319,23 @@ async function processUplinkMessage(topic, payloadBuffer) {
       if (sRow.sensor_to_ref_distance != null) sensorToRef = Number(sRow.sensor_to_ref_distance);
       if (sRow.blind_zone_offset != null) blindZoneOffset = Number(sRow.blind_zone_offset);
       if (sRow.tilt_compensation_enabled != null) tiltCompensationEnabled = sRow.tilt_compensation_enabled;
+      if (sRow.tilt_offset_x != null) tiltOffsetX = Number(sRow.tilt_offset_x);
+      if (sRow.tilt_offset_y != null) tiltOffsetY = Number(sRow.tilt_offset_y);
     }
   } catch (err) {
     console.warn('[ReadingService] Failed to fetch station calibration:', err.message);
   }
 
-  // Calculate relative water level: ΔL = D_ref - D_sensor (pure vertical distance)
+  // Calculate relative water level: ΔL = D_ref - D_vertical (with cosine tilt compensation when enabled)
   if (fields.raw_distance != null) {
-    fields.water_level = parseFloat((sensorToRef - fields.raw_distance).toFixed(3));
+    let verticalDistance = Number(fields.raw_distance);
+    if (tiltCompensationEnabled && (fields.tilt_x != null || fields.tilt_y != null)) {
+      const relX = (fields.tilt_x != null ? Number(fields.tilt_x) : 0) - tiltOffsetX;
+      const relY = (fields.tilt_y != null ? Number(fields.tilt_y) : 0) - tiltOffsetY;
+      const totalTiltDeg = Math.min(45, Math.sqrt(relX * relX + relY * relY));
+      verticalDistance = verticalDistance * Math.cos((totalTiltDeg * Math.PI) / 180);
+    }
+    fields.water_level = parseFloat((sensorToRef - verticalDistance).toFixed(3));
     fields.is_blind_zone = fields.raw_distance <= blindZoneOffset;
   }
 
@@ -394,21 +406,23 @@ async function getLatestReadingsPerStation(isStaffOrAdmin = false) {
       s.reference_point_name,
       r.timestamp,
       r.raw_distance,
+      (r.raw_distance IS NOT NULL OR r.water_level IS NOT NULL) AS has_reading,
       COALESCE(
         r.water_level,
         CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
       ) AS water_level,
       CASE
+        WHEN r.raw_distance IS NULL AND r.water_level IS NULL THEN 'normal'
         WHEN s.critical_level IS NOT NULL AND (
           COALESCE(
             r.water_level,
-            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+            ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3)
           ) >= s.critical_level
         ) THEN 'critical'
         WHEN s.warning_level IS NOT NULL AND (
           COALESCE(
             r.water_level,
-            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+            ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3)
           ) >= s.warning_level
         ) THEN 'warning'
         ELSE 'normal'
@@ -448,21 +462,23 @@ async function getReadingsByStation(stationId, limit = 100, offset = 0, isStaffO
       s.critical_level,
       r.timestamp,
       r.raw_distance,
+      (r.raw_distance IS NOT NULL OR r.water_level IS NOT NULL) AS has_reading,
       COALESCE(
         r.water_level,
         CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
       ) AS water_level,
       CASE
+        WHEN r.raw_distance IS NULL AND r.water_level IS NULL THEN 'normal'
         WHEN s.critical_level IS NOT NULL AND (
           COALESCE(
             r.water_level,
-            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+            ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3)
           ) >= s.critical_level
         ) THEN 'critical'
         WHEN s.warning_level IS NOT NULL AND (
           COALESCE(
             r.water_level,
-            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+            ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3)
           ) >= s.warning_level
         ) THEN 'warning'
         ELSE 'normal'
@@ -498,21 +514,23 @@ async function getReadingsInRange(stationId, startTime, endTime, isStaffOrAdmin 
       r.reading_id, r.station_id, r.timestamp,
       s.warning_level, s.critical_level,
       r.raw_distance,
+      (r.raw_distance IS NOT NULL OR r.water_level IS NOT NULL) AS has_reading,
       COALESCE(
         r.water_level,
         CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
       ) AS water_level,
       CASE
+        WHEN r.raw_distance IS NULL AND r.water_level IS NULL THEN 'normal'
         WHEN s.critical_level IS NOT NULL AND (
           COALESCE(
             r.water_level,
-            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+            ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3)
           ) >= s.critical_level
         ) THEN 'critical'
         WHEN s.warning_level IS NOT NULL AND (
           COALESCE(
             r.water_level,
-            CASE WHEN r.raw_distance IS NOT NULL THEN ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3) ELSE 0 END
+            ROUND((s.sensor_to_ref_distance - r.raw_distance)::numeric, 3)
           ) >= s.warning_level
         ) THEN 'warning'
         ELSE 'normal'
@@ -556,7 +574,7 @@ async function recalculateStationReadings(stationId, sensorToRef, _tiltEnabled =
  * Supports timeRange: 'hourly' | 'daily' | 'weekly' for statistical aggregation
  * or raw export if timeRange is not specified.
  */
-async function exportReadingsToCSV({ stationId, startTime, endTime, timeRange, isStaffOrAdmin = false }) {
+async function exportReadingsToCSV({ stationId, allowedStationIds, startTime, endTime, timeRange, isStaffOrAdmin = false }) {
   const conditions = [];
   const values = [];
   let idx = 1;
@@ -564,6 +582,9 @@ async function exportReadingsToCSV({ stationId, startTime, endTime, timeRange, i
   if (stationId) {
     conditions.push(`r.station_id = $${idx++}`);
     values.push(stationId);
+  } else if (Array.isArray(allowedStationIds) && allowedStationIds.length > 0) {
+    conditions.push(`r.station_id = ANY($${idx++})`);
+    values.push(allowedStationIds);
   }
 
   // Set default start/end times if not provided when timeRange is given
@@ -612,18 +633,28 @@ async function exportReadingsToCSV({ stationId, startTime, endTime, timeRange, i
     return str;
   };
 
+  // Convert any Date to Thailand time (UTC+7) parts reliably regardless of server OS timezone
+  const toThaiParts = (d) => {
+    const thaiMs = d.getTime() + 7 * 60 * 60 * 1000;
+    const td = new Date(thaiMs);
+    return {
+      day: String(td.getUTCDate()).padStart(2, '0'),
+      month: String(td.getUTCMonth() + 1).padStart(2, '0'),
+      year: td.getUTCFullYear(),
+      hours: String(td.getUTCHours()).padStart(2, '0'),
+      mins: String(td.getUTCMinutes()).padStart(2, '0'),
+      secs: String(td.getUTCSeconds()).padStart(2, '0'),
+    };
+  };
+
   const formatD = (d) => {
-    const day = String(d.getDate()).padStart(2, '0');
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const year = d.getFullYear();
-    return `${day}/${month}/${year}`;
+    const p = toThaiParts(d);
+    return `${p.day}/${p.month}/${p.year}`;
   };
 
   const formatDT = (d) => {
-    const dateStr = formatD(d);
-    const hours = String(d.getHours()).padStart(2, '0');
-    const mins = String(d.getMinutes()).padStart(2, '0');
-    return `${dateStr} ${hours}:${mins}`;
+    const p = toThaiParts(d);
+    return `${p.day}/${p.month}/${p.year} ${p.hours}:${p.mins}`;
   };
 
   // ── Case A: Aggregated export (hourly, daily, weekly) ─────────────────────
@@ -631,7 +662,7 @@ async function exportReadingsToCSV({ stationId, startTime, endTime, timeRange, i
     const truncUnit = timeRange === 'hourly' ? 'hour' : timeRange === 'daily' ? 'day' : 'week';
     const sql = `
       SELECT
-        date_trunc('${truncUnit}', r.timestamp) AS time_bucket,
+        (date_trunc('${truncUnit}', r.timestamp AT TIME ZONE 'Asia/Bangkok') AT TIME ZONE 'Asia/Bangkok') AS time_bucket,
         r.station_id,
         s.station_name,
         s.location_name,
@@ -641,15 +672,15 @@ async function exportReadingsToCSV({ stationId, startTime, endTime, timeRange, i
         s.critical_level,
         ROUND(AVG(COALESCE(
           r.water_level,
-          CASE WHEN r.raw_distance IS NOT NULL THEN (s.sensor_to_ref_distance - r.raw_distance) ELSE 0 END
+          CASE WHEN r.raw_distance IS NOT NULL THEN (s.sensor_to_ref_distance - r.raw_distance) ELSE NULL END
         ))::numeric, 2) AS avg_water_level,
         ROUND(MIN(COALESCE(
           r.water_level,
-          CASE WHEN r.raw_distance IS NOT NULL THEN (s.sensor_to_ref_distance - r.raw_distance) ELSE 0 END
+          CASE WHEN r.raw_distance IS NOT NULL THEN (s.sensor_to_ref_distance - r.raw_distance) ELSE NULL END
         ))::numeric, 2) AS min_water_level,
         ROUND(MAX(COALESCE(
           r.water_level,
-          CASE WHEN r.raw_distance IS NOT NULL THEN (s.sensor_to_ref_distance - r.raw_distance) ELSE 0 END
+          CASE WHEN r.raw_distance IS NOT NULL THEN (s.sensor_to_ref_distance - r.raw_distance) ELSE NULL END
         ))::numeric, 2) AS max_water_level,
         ROUND(AVG(r.raw_distance)::numeric, 2) AS avg_raw_distance,
         BOOL_OR(r.is_blind_zone) AS is_blind_zone,
@@ -668,7 +699,7 @@ async function exportReadingsToCSV({ stationId, startTime, endTime, timeRange, i
       JOIN station s ON s.station_id = r.station_id
       ${whereClause}
       GROUP BY
-        date_trunc('${truncUnit}', r.timestamp),
+        date_trunc('${truncUnit}', r.timestamp AT TIME ZONE 'Asia/Bangkok'),
         r.station_id,
         s.station_name,
         s.location_name,
@@ -728,14 +759,14 @@ async function exportReadingsToCSV({ stationId, startTime, endTime, timeRange, i
       let timeValue = '';
       if (row.time_bucket) {
         const d = new Date(row.time_bucket);
+        const p = toThaiParts(d);
         if (timeRange === 'hourly') {
-          timeValue = `${formatD(d)} ${String(d.getHours()).padStart(2, '0')}:00`;
+          timeValue = `${p.day}/${p.month}/${p.year} ${p.hours}:00`;
         } else if (timeRange === 'daily') {
           timeValue = formatD(d);
         } else {
           // weekly: start Monday to Sunday
-          const endWeek = new Date(d);
-          endWeek.setDate(d.getDate() + 6);
+          const endWeek = new Date(d.getTime() + 6 * 24 * 60 * 60 * 1000);
           timeValue = `${formatD(d)} - ${formatD(endWeek)}`;
         }
       }
@@ -744,7 +775,7 @@ async function exportReadingsToCSV({ stationId, startTime, endTime, timeRange, i
       const minLvl = row.min_water_level != null ? Number(row.min_water_level) : null;
       const maxLvl = row.max_water_level != null ? Number(row.max_water_level) : null;
 
-      let statusText = 'ปกติ';
+      let statusText = avgLvl == null ? 'รอข้อมูล' : 'ปกติ';
       if (row.critical_level != null && avgLvl != null && avgLvl >= Number(row.critical_level)) {
         statusText = 'วิกฤต';
       } else if (row.warning_level != null && avgLvl != null && avgLvl >= Number(row.warning_level)) {
@@ -850,28 +881,24 @@ async function exportReadingsToCSV({ stationId, startTime, endTime, timeRange, i
     if (row.timestamp) {
       const d = new Date(row.timestamp);
       if (!isNaN(d.getTime())) {
-        const day = String(d.getDate()).padStart(2, '0');
-        const month = String(d.getMonth() + 1).padStart(2, '0');
-        const year = d.getFullYear();
-        const hours = String(d.getHours()).padStart(2, '0');
-        const mins = String(d.getMinutes()).padStart(2, '0');
-        const secs = String(d.getSeconds()).padStart(2, '0');
-        formattedDate = `${day}/${month}/${year} ${hours}:${mins}:${secs}`;
+        const p = toThaiParts(d);
+        formattedDate = `${p.day}/${p.month}/${p.year} ${p.hours}:${p.mins}:${p.secs}`;
       } else {
         formattedDate = String(row.timestamp);
       }
     }
 
+    const hasRowReading = row.raw_distance !== null && row.raw_distance !== undefined;
     const waterLevelNum = row.water_level !== null && row.water_level !== undefined ? Number(row.water_level) : null;
     let waterLevelStr = '-';
     if (waterLevelNum !== null) {
       waterLevelStr = (waterLevelNum > 0 ? '+' : '') + waterLevelNum.toFixed(2);
     }
 
-    let statusText = 'ปกติ';
-    if (row.critical_level !== null && row.critical_level !== undefined && waterLevelNum !== null && waterLevelNum >= Number(row.critical_level)) {
+    let statusText = !hasRowReading ? 'รอข้อมูล' : 'ปกติ';
+    if (hasRowReading && row.critical_level !== null && row.critical_level !== undefined && waterLevelNum !== null && waterLevelNum >= Number(row.critical_level)) {
       statusText = 'วิกฤต';
-    } else if (row.warning_level !== null && row.warning_level !== undefined && waterLevelNum !== null && waterLevelNum >= Number(row.warning_level)) {
+    } else if (hasRowReading && row.warning_level !== null && row.warning_level !== undefined && waterLevelNum !== null && waterLevelNum >= Number(row.warning_level)) {
       statusText = 'เฝ้าระวัง';
     }
 
